@@ -133,44 +133,42 @@ function parseCentralEuropeanDateTime(value) {
 }
 
 function getClientPrincipal(request) {
-  const userName = String(
-    request.headers.get("x-requester-user-name") || ""
-  ).trim();
+  const encodedPrincipal =
+    request.headers.get("x-ms-client-principal");
 
-  if (!userName || userName.length > 120) {
+  if (!encodedPrincipal) {
     return null;
   }
 
-  if (!/^[A-Za-z0-9._@\\-]+$/.test(userName)) {
+  try {
+    const decodedPrincipal = Buffer
+      .from(encodedPrincipal, "base64")
+      .toString("utf8");
+
+    return JSON.parse(decodedPrincipal);
+  } catch {
     return null;
   }
-
-  return {
-    identityProvider: "manual",
-    userRoles: ["authenticated"],
-    userDetails: userName,
-    userId: userName.toLowerCase()
-  };
 }
 
 function validateAuthenticatedPrincipal(principal) {
   if (!principal || typeof principal !== "object") {
-    return "A requester user name is required.";
+    return "Microsoft Entra authentication is required.";
   }
 
   if (
-    principal.identityProvider !== "manual" ||
+    principal.identityProvider !== "aad" ||
     !Array.isArray(principal.userRoles) ||
     !principal.userRoles.includes("authenticated")
   ) {
-    return "A valid requester user name is required.";
+    return "A valid Microsoft Entra authenticated session is required.";
   }
 
   if (
     !String(principal.userDetails || "").trim() ||
     !String(principal.userId || "").trim()
   ) {
-    return "The requester user name could not be resolved.";
+    return "The authenticated requester identity could not be resolved.";
   }
 
   return "";

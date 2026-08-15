@@ -1,7 +1,7 @@
 {
   "properties": {
     "roleName": "VM Health Diagnostic Reader",
-    "description": "Read-only runtime permissions for VM Health Diagnostic V2. Includes VM/runtime/extension reads, Azure Monitor metrics and Activity Log, active alerts, Resource Health current/history, managed disks, NICs, effective routes/NSGs, DCRs, Update Manager assessment, and Azure Backup protected-item/status reads. No VM, disk, network, patch, backup, or monitoring configuration is modified.",
+    "description": "Read-only Azure control-plane permissions for VM Health Diagnostic V2.1. Regional Log Analytics data access is granted separately with the built-in Log Analytics Data Reader role on each regional LAW. No VM, disk, network, patch, backup, or monitoring configuration is modified.",
     "assignableScopes": [
       "/subscriptions/<TARGET-SUBSCRIPTION-ID>"
     ],

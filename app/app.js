@@ -5,6 +5,10 @@ const FIXED_TIME_ZONE = "W. Europe Standard Time";
 const IANA_TIME_ZONE = "Europe/Amsterdam";
 const MINIMUM_LEAD_MINUTES = 45;
 const MAXIMUM_DURATION_HOURS = 24;
+const IDLE_TIMEOUT_MINUTES = 60;
+const IDLE_ACTIVITY_THROTTLE_MS = 30000;
+const LAST_ACTIVITY_STORAGE_KEY =
+  "alertSuppressionLastActivityUtc";
 
 const form = document.getElementById("suppressionForm");
 const hostnamesInput = document.getElementById("hostnames");
@@ -127,8 +131,216 @@ let healthStatusPollTimer = null;
 let healthStatusPollCount = 0;
 let currentHealthRequestId = null;
 
-let manualRequester = null;
+let authenticatedPrincipal = null;
 
+
+let idleLogoutTimer = null;
+let idleCheckInterval = null;
+let lastActivityWrittenAt = 0;
+let logoutStarted = false;
+
+function getSignedOutUrl(reason) {
+  const url = new URL("/signed-out.html", window.location.origin);
+  url.searchParams.set("reason", reason);
+  return `${url.pathname}${url.search}`;
+}
+
+function logoutUser(reason = "manual") {
+  if (logoutStarted) return;
+
+  logoutStarted = true;
+  clearTimeout(idleLogoutTimer);
+  clearInterval(idleCheckInterval);
+
+  try {
+    localStorage.removeItem(LAST_ACTIVITY_STORAGE_KEY);
+  } catch {
+    // Continue with logout when browser storage is unavailable.
+  }
+
+  const redirectUrl = encodeURIComponent(
+    getSignedOutUrl(reason)
+  );
+
+  window.location.replace(
+    `/.auth/logout?post_logout_redirect_uri=${redirectUrl}`
+  );
+}
+
+function readStoredLastActivity() {
+  try {
+    const rawValue = localStorage.getItem(
+      LAST_ACTIVITY_STORAGE_KEY
+    );
+
+    if (!rawValue) return null;
+
+    const storedValue = Number(rawValue);
+
+    return Number.isFinite(storedValue) && storedValue > 0
+      ? storedValue
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastActivity(timestamp) {
+  try {
+    localStorage.setItem(
+      LAST_ACTIVITY_STORAGE_KEY,
+      String(timestamp)
+    );
+  } catch {
+    // The current-tab timer still works without localStorage.
+  }
+
+  lastActivityWrittenAt = timestamp;
+}
+
+function getIdleMilliseconds() {
+  const lastActivity =
+    readStoredLastActivity() ?? lastActivityWrittenAt;
+
+  if (!lastActivity) return 0;
+
+  return Date.now() - lastActivity;
+}
+
+function hasIdleSessionExpired() {
+  return (
+    getIdleMilliseconds() >=
+    IDLE_TIMEOUT_MINUTES * 60 * 1000
+  );
+}
+
+function checkIdleTimeout() {
+  if (logoutStarted) return true;
+
+  if (hasIdleSessionExpired()) {
+    logoutUser("idle");
+    return true;
+  }
+
+  return false;
+}
+
+function scheduleIdleLogout() {
+  clearTimeout(idleLogoutTimer);
+
+  const lastActivity =
+    readStoredLastActivity() ?? lastActivityWrittenAt;
+
+  if (!lastActivity) return;
+
+  const remainingMilliseconds =
+    IDLE_TIMEOUT_MINUTES * 60 * 1000 -
+    (Date.now() - lastActivity);
+
+  if (remainingMilliseconds <= 0) {
+    logoutUser("idle");
+    return;
+  }
+
+  idleLogoutTimer = window.setTimeout(
+    () => checkIdleTimeout(),
+    remainingMilliseconds
+  );
+}
+
+function recordUserActivity() {
+  if (logoutStarted) return;
+
+  // Do not allow a focus, click, or key press to revive an already
+  // expired session. Check expiry before updating the timestamp.
+  if (checkIdleTimeout()) return;
+
+  const now = Date.now();
+
+  if (
+    now - lastActivityWrittenAt >=
+    IDLE_ACTIVITY_THROTTLE_MS
+  ) {
+    writeLastActivity(now);
+  }
+
+  scheduleIdleLogout();
+}
+
+function startIdleLogoutMonitoring() {
+  const storedLastActivity = readStoredLastActivity();
+
+  if (storedLastActivity) {
+    lastActivityWrittenAt = storedLastActivity;
+
+    if (checkIdleTimeout()) return;
+  } else {
+    writeLastActivity(Date.now());
+  }
+
+  const activityEvents = [
+    "pointerdown",
+    "keydown",
+    "wheel",
+    "scroll",
+    "touchstart"
+  ];
+
+  for (const eventName of activityEvents) {
+    window.addEventListener(
+      eventName,
+      recordUserActivity,
+      { passive: true }
+    );
+  }
+
+  // Focus or returning to a hidden tab must first verify that the
+  // previous session has not already expired. It must not reset the
+  // timer before that check.
+  window.addEventListener("focus", () => {
+    if (!checkIdleTimeout()) {
+      scheduleIdleLogout();
+    }
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (
+      document.visibilityState === "visible" &&
+      !checkIdleTimeout()
+    ) {
+      scheduleIdleLogout();
+    }
+  });
+
+  window.addEventListener("pageshow", () => {
+    if (!checkIdleTimeout()) {
+      scheduleIdleLogout();
+    }
+  });
+
+  window.addEventListener("storage", (event) => {
+    if (event.key === LAST_ACTIVITY_STORAGE_KEY) {
+      const updatedActivity = readStoredLastActivity();
+
+      if (updatedActivity) {
+        lastActivityWrittenAt = updatedActivity;
+      }
+
+      if (!checkIdleTimeout()) {
+        scheduleIdleLogout();
+      }
+    }
+  });
+
+  // Browser timers can be delayed while a tab is hidden or a device
+  // sleeps. A wall-clock check makes logout reliable when execution resumes.
+  idleCheckInterval = window.setInterval(
+    () => checkIdleTimeout(),
+    30000
+  );
+
+  scheduleIdleLogout();
+}
 
 
 function activateOperationTab(tabName) {
@@ -316,62 +528,89 @@ function updateHostnameCount() {
   hostnameCount.classList.toggle("over-limit", count > MAX_HOSTNAMES);
 }
 
-const USER_NAME_STORAGE_KEY = "vmOperationsRequesterUserName";
+function getClaim(principal, claimTypes) {
+  if (!Array.isArray(principal?.claims)) return "";
 
-function getManualRequesterUserName() {
-  try {
-    return String(localStorage.getItem(USER_NAME_STORAGE_KEY) || "").trim();
-  } catch {
-    return "";
-  }
+  const accepted = new Set(
+    claimTypes.map((claimType) => claimType.toLowerCase())
+  );
+
+  const claim = principal.claims.find((item) =>
+    accepted.has(String(item?.typ || "").toLowerCase())
+  );
+
+  return String(claim?.val || "").trim();
 }
 
-async function portalFetch(input, init = {}) {
-  const userName = getManualRequesterUserName();
-  if (!userName) {
-    window.location.assign("/");
-    throw new Error("Requester user name is required.");
+async function loadAuthenticatedUser() {
+  const response = await fetch("/.auth/me", {
+    method: "GET",
+    headers: {
+      Accept: "application/json"
+    },
+    cache: "no-store"
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Unable to read authenticated identity (HTTP ${response.status}).`
+    );
   }
 
-  const headers = new Headers(init.headers || {});
-  headers.set("X-Requester-User-Name", userName);
-  return window.fetch(input, { ...init, headers });
-}
+  const payload = await response.json();
+  const principal = payload?.clientPrincipal;
 
-async function loadManualRequester() {
-  const userName = getManualRequesterUserName();
-  if (!userName) {
-    window.location.assign("/");
+  if (
+    !principal ||
+    !Array.isArray(principal.userRoles) ||
+    !principal.userRoles.includes("authenticated")
+  ) {
+    window.location.assign(
+      "/.auth/login/aad?post_login_redirect_uri=/portal.html"
+    );
     return;
   }
 
-  manualRequester = {
-    userDetails: userName,
-    userId: userName.toLowerCase(),
-    identityProvider: "manual"
-  };
+  const nameFromClaim = getClaim(principal, [
+    "name",
+    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"
+  ]);
 
-  authenticatedUserName.textContent = userName;
-  authenticatedProvider.textContent = "Manual user name";
-  identityStatus.textContent = "Ready";
+  const displayName =
+    nameFromClaim ||
+    String(principal.userDetails || "").trim() ||
+    "Authenticated user";
+
+  authenticatedPrincipal = principal;
+  authenticatedUserName.textContent = displayName;
+  authenticatedProvider.textContent =
+    principal.identityProvider === "aad"
+      ? "Microsoft Entra ID"
+      : String(principal.identityProvider || "Authenticated identity");
+
+  identityStatus.textContent = "Identity verified";
   identityStatus.classList.remove("error");
   identityStatus.classList.add("verified");
 
   submitButton.disabled = false;
   submitButton.textContent = "Submit suppression request";
+
   snapshotSubmitButton.disabled = false;
   snapshotSubmitButton.textContent = "Create VM snapshots";
+
   backupCheckButton.disabled = false;
   backupCheckButton.textContent = "Check Backup Status";
+
   backupSubmitButton.disabled = true;
   backupSubmitButton.textContent = "Check backup status first";
+
   healthSubmitButton.disabled = false;
   healthSubmitButton.textContent = "Run VM health diagnostic";
 }
 
 function validateForm(payload) {
-  if (!manualRequester) {
-    return "Your requester user name is not available. Return to the start page and enter it again.";
+  if (!authenticatedPrincipal) {
+    return "Your authenticated identity is not available. Refresh the page.";
   }
 
   if (payload.hostnames.length < 1) {
@@ -495,8 +734,8 @@ function updateSnapshotHostnameCount() {
 }
 
 function validateSnapshotForm(payload) {
-  if (!manualRequester) {
-    return "Your requester user name is not available. Return to the start page and enter it again.";
+  if (!authenticatedPrincipal) {
+    return "Your authenticated identity is not available. Refresh the page.";
   }
 
   if (payload.hostnames.length < 1) {
@@ -778,7 +1017,7 @@ async function pollSnapshotStatus(requestId) {
   snapshotStatusPollCount += 1;
 
   try {
-    const response = await portalFetch(
+    const response = await fetch(
       `/api/getSnapshotStatus?requestId=${encodeURIComponent(
         requestId
       )}`,
@@ -792,7 +1031,9 @@ async function pollSnapshotStatus(requestId) {
     );
 
     if (response.status === 401) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
+      );
       return;
     }
 
@@ -1129,7 +1370,7 @@ function renderMySnapshotRequests(
 async function loadMySnapshotRequests(
   showLoading = true
 ) {
-  if (!manualRequester) {
+  if (!authenticatedPrincipal) {
     return;
   }
 
@@ -1143,7 +1384,7 @@ async function loadMySnapshotRequests(
 
   try {
     const response =
-      await portalFetch(
+      await fetch(
         "/api/getMySnapshotRequests?limit=5",
         {
           method: "GET",
@@ -1156,7 +1397,9 @@ async function loadMySnapshotRequests(
       );
 
     if (response.status === 401) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
+      );
       return;
     }
 
@@ -1202,7 +1445,7 @@ async function openSnapshotRequestFromHistory(
 
   try {
     const response =
-      await portalFetch(
+      await fetch(
         `/api/getSnapshotStatus?requestId=${encodeURIComponent(
           requestId
         )}`,
@@ -1217,7 +1460,9 @@ async function openSnapshotRequestFromHistory(
       );
 
     if (response.status === 401) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
+      );
       return;
     }
 
@@ -1588,7 +1833,7 @@ async function checkBackupStatusBeforeSubmit() {
 
   try {
     const response =
-      await portalFetch(
+      await fetch(
         "/api/checkBackupStatus",
         {
           method: "POST",
@@ -1624,7 +1869,9 @@ async function checkBackupStatusBeforeSubmit() {
     }
 
     if (response.status === 401) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
+      );
       return;
     }
 
@@ -1653,18 +1900,18 @@ async function checkBackupStatusBeforeSubmit() {
       </div>`;
   } finally {
     backupCheckButton.disabled =
-      !manualRequester;
+      !authenticatedPrincipal;
 
     backupCheckButton.textContent =
-      manualRequester
+      authenticatedPrincipal
         ? "Check Backup Status"
-        : "User name required";
+        : "Authentication required";
   }
 }
 
 function validateBackupForm(payload) {
-  if (!manualRequester) {
-    return "Your requester user name is not available. Return to the start page and enter it again.";
+  if (!authenticatedPrincipal) {
+    return "Your authenticated identity is not available. Refresh the page.";
   }
 
   if (
@@ -2165,7 +2412,7 @@ function renderMyBackupRequests(
 async function loadMyBackupRequests(
   showLoading = true
 ) {
-  if (!manualRequester) {
+  if (!authenticatedPrincipal) {
     return;
   }
 
@@ -2179,7 +2426,7 @@ async function loadMyBackupRequests(
 
   try {
     const response =
-      await portalFetch(
+      await fetch(
         "/api/getMyBackupRequests?limit=5",
         {
           method: "GET",
@@ -2192,7 +2439,9 @@ async function loadMyBackupRequests(
       );
 
     if (response.status === 401) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
+      );
       return;
     }
 
@@ -2238,7 +2487,7 @@ async function openBackupRequestFromHistory(
 
   try {
     const response =
-      await portalFetch(
+      await fetch(
         `/api/getBackupStatus?requestId=${encodeURIComponent(
           requestId
         )}`,
@@ -2253,7 +2502,9 @@ async function openBackupRequestFromHistory(
       );
 
     if (response.status === 401) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
+      );
       return;
     }
 
@@ -2317,7 +2568,7 @@ async function pollBackupStatus(
 
   try {
     const response =
-      await portalFetch(
+      await fetch(
         `/api/getBackupStatus?requestId=${encodeURIComponent(
           requestId
         )}`,
@@ -2334,7 +2585,9 @@ async function pollBackupStatus(
     if (
       response.status === 401
     ) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
+      );
       return;
     }
 
@@ -2648,7 +2901,7 @@ function updateHealthHostnameCount() {
 }
 
 function validateHealthForm(payload) {
-  if (!manualRequester) return "Your requester user name is not available. Return to the start page and enter it again.";
+  if (!authenticatedPrincipal) return "Your authenticated identity is not available. Refresh the page.";
   if (payload.hostnames.length < 1) return "Enter a VM hostname.";
   if (payload.hostnames.length > HEALTH_MAX_HOSTNAMES) return "VM Health Diagnostic accepts exactly one VM hostname per request.";
 
@@ -2806,17 +3059,50 @@ function healthReadPlatform(result) {
   };
 }
 
-function healthReadGuestRows(result) {
-  const table = Array.isArray(result?.guestMetrics?.tables) ? result.guestMetrics.tables[0] : null;
+function healthRowsFromLawQuery(queryBody) {
+  const table = Array.isArray(queryBody?.tables) ? queryBody.tables[0] : null;
   if (!table || !Array.isArray(table.columns) || !Array.isArray(table.rows)) return [];
   const columns = table.columns.map((column) => String(column?.name || ""));
   return table.rows.map((row) => Object.fromEntries(columns.map((column, index) => [column, row[index]])));
 }
 
+function healthReadGuestRows(result) {
+  return healthRowsFromLawQuery(result?.guestMetrics);
+}
+
+function healthReadHeartbeat(result) {
+  const rows = healthRowsFromLawQuery(result?.heartbeat);
+  const row = rows[0] || {};
+  return {
+    heartbeatUtc: row.LastHeartbeat || row.TimeGenerated || null,
+    computer: row.Computer || "",
+    resourceId: row.ResourceId || ""
+  };
+}
+
+function healthReadLawPerformance(result) {
+  return healthRowsFromLawQuery(result?.lawPerformance);
+}
+
+function healthReadRegionalLaw(result) {
+  const regional = result?.regionalLaw || {};
+  const workspace = regional?.workspace || {};
+  return {
+    mappedName: String(regional?.mappedName || ""),
+    workspaceName: String(workspace?.WorkspaceName || regional?.mappedName || ""),
+    workspaceId: String(workspace?.WorkspaceId || ""),
+    workspaceResourceId: String(workspace?.WorkspaceResourceId || ""),
+    workspaceResourceGroup: String(workspace?.WorkspaceResourceGroup || ""),
+    workspaceSubscriptionId: String(workspace?.WorkspaceSubscriptionId || ""),
+    workspaceLocation: String(workspace?.WorkspaceLocation || ""),
+    matchCount: Number(regional?.matchCount || 0),
+    lookupStatus: String(regional?.lookupStatus || "Unknown")
+  };
+}
+
 function healthReadGuest(result) {
   const rows = healthReadGuestRows(result);
   const memoryRow = rows.find((row) => row.Namespace === "Memory" && row.Name === "AvailableMB");
-  const heartbeatRow = rows.find((row) => row.Namespace === "Computer" && row.Name === "Heartbeat");
   let availableMemoryMb = healthFiniteNumber(memoryRow?.Value);
   let availableMemoryPercent = null;
   if (memoryRow) {
@@ -2844,7 +3130,7 @@ function healthReadGuest(result) {
     availableMemoryPercent,
     lowestDiskFreePercent: freePercents.length ? Math.min(...freePercents) : null,
     disks,
-    heartbeatUtc: heartbeatRow?.TimeGenerated || null,
+    heartbeatUtc: null,
     latestGuestUtc,
     dataAvailable: rows.length > 0
   };
@@ -2878,16 +3164,26 @@ function healthReadMonitoring(result, guest) {
     return text.includes("azuremonitorwindowsagent") || text.includes("azuremonitorlinuxagent");
   });
   const dcrs = Array.isArray(result?.dcrAssociations?.value) ? result.dcrAssociations.value : [];
-  const heartbeatAge = healthAgeMinutes(guest.heartbeatUtc);
+  const heartbeat = healthReadHeartbeat(result);
+  const regionalLaw = healthReadRegionalLaw(result);
+  const heartbeatUtc = heartbeat.heartbeatUtc || guest.heartbeatUtc || null;
+  const heartbeatAge = healthAgeMinutes(heartbeatUtc);
   return {
     amaInstalled: Boolean(amaExtension),
     amaProvisioningState: amaExtension?.properties?.provisioningState || "Unknown",
     dcrCount: dcrs.length,
     dcrs,
     vmInsightsDataAvailable: guest.dataAvailable,
-    heartbeatUtc: guest.heartbeatUtc,
+    heartbeatUtc,
     heartbeatAgeMinutes: heartbeatAge,
-    heartbeatState: heartbeatAge === null ? "Unknown" : heartbeatAge <= 10 ? "Reporting" : heartbeatAge <= 30 ? "Stale" : "No recent heartbeat"
+    heartbeatState: heartbeatAge === null ? "Unknown" : heartbeatAge <= 10 ? "Reporting" : heartbeatAge <= 30 ? "Stale" : "No recent heartbeat",
+    regionalLawName: regionalLaw.workspaceName || regionalLaw.mappedName || "Unknown",
+    regionalLawWorkspaceId: regionalLaw.workspaceId || "",
+    regionalLawLocation: regionalLaw.workspaceLocation || "",
+    regionalLawResourceGroup: regionalLaw.workspaceResourceGroup || "",
+    regionalLawMatchCount: regionalLaw.matchCount,
+    regionalLawLookupStatus: regionalLaw.lookupStatus,
+    lawPerformance: healthReadLawPerformance(result)
   };
 }
 
@@ -2934,11 +3230,11 @@ function healthAddFinding(findings, severity, code, message) {
   findings.push({ severity, code, message });
 }
 
-function healthDataFreshness(result, platform, guest, patch, backup) {
+function healthDataFreshness(result, platform, guest, patch, backup, monitoring) {
   const candidates = [
     { name: "Platform metrics", utc: platform.cpu.latestUtc },
     { name: "Guest telemetry", utc: guest.latestGuestUtc },
-    { name: "Heartbeat", utc: guest.heartbeatUtc },
+    { name: "Heartbeat", utc: monitoring.heartbeatUtc },
     { name: "Patch assessment", utc: patch.lastAssessmentUtc },
     { name: "Last backup", utc: backup.lastBackupTime },
     { name: "Resource Health", utc: result?.resourceHealth?.properties?.reportedTime || null }
@@ -3020,7 +3316,9 @@ function deriveVmHealth(result) {
   if (patch.rebootPending === true) healthAddFinding(findings, "Warning", "PATCH_REBOOT", "The latest patch assessment indicates a reboot is pending.");
   if (!monitoring.amaInstalled) healthAddFinding(findings, "Warning", "AMA_MISSING", "Azure Monitor Agent was not detected in the VM extension list.");
   if (monitoring.dcrCount < 1) healthAddFinding(findings, "Warning", "DCR_MISSING", "No Data Collection Rule association was returned for this VM.");
-  if (!monitoring.vmInsightsDataAvailable) healthAddFinding(findings, "Warning", "GUEST_TELEMETRY_UNKNOWN", "VM Insights guest telemetry was not returned from the configured Log Analytics workspace; memory and logical-disk health remain Unknown.");
+  if (monitoring.regionalLawName === "Unknown") healthAddFinding(findings, "Warning", "REGIONAL_LAW_UNKNOWN", `No regional Log Analytics workspace mapping was resolved for Azure region ${result?.vm?.Location || "Unknown"}.`);
+  if (!monitoring.vmInsightsDataAvailable) healthAddFinding(findings, "Warning", "GUEST_TELEMETRY_UNKNOWN", `VM Insights guest telemetry was not returned from regional LAW ${monitoring.regionalLawName}; memory and logical-disk health remain Unknown.`);
+  if (running && monitoring.heartbeatAgeMinutes === null) healthAddFinding(findings, "Warning", "HEARTBEAT_UNKNOWN", `No Heartbeat record was returned from regional LAW ${monitoring.regionalLawName}.`);
   if (monitoring.heartbeatAgeMinutes !== null && monitoring.heartbeatAgeMinutes > 30) healthAddFinding(findings, "Warning", "HEARTBEAT_STALE", `Latest VM Insights heartbeat is ${healthAgeText(monitoring.heartbeatUtc)}.`);
 
   const failedSources = Object.entries(result?.actionStatus || {}).filter(([, status]) => status !== "Succeeded").map(([name]) => name);
@@ -3034,13 +3332,13 @@ function deriveVmHealth(result) {
   if (!running) recommendations.push("Verify whether the VM shutdown/deallocation was planned. Performance telemetry is shown as N/A while the VM is not running.");
   if (/unavailable|degraded/i.test(resourceHealth)) recommendations.push("Review Resource Health history and any recommended Azure actions for the current availability event.");
   if (alerts.length) recommendations.push("Review the active Azure Monitor alerts and resolve the highest-severity fired condition first.");
-  if (!monitoring.vmInsightsDataAvailable) recommendations.push("Validate AMA, DCR association, Log Analytics workspace access and VM Insights data flow before relying on guest memory/disk health.");
+  if (!monitoring.vmInsightsDataAvailable) recommendations.push(`Validate VM Insights / InsightsMetrics collection in regional LAW ${monitoring.regionalLawName} before relying on guest memory/disk health.`);
   if (monitoring.heartbeatAgeMinutes !== null && monitoring.heartbeatAgeMinutes > 30) recommendations.push("Investigate the stale VM Insights heartbeat: check AMA extension state, DCR association, outbound connectivity and workspace ingestion.");
   if (patch.criticalSecurityCount > 0) recommendations.push("Review pending Critical/Security patches in Azure Update Manager and schedule remediation through the approved patch process.");
   if (backup.protected.toLowerCase() !== "protected" || /unhealthy|failed/i.test(backup.lastBackupStatus)) recommendations.push("Review Azure Backup protection and the latest backup job before relying on recovery-point availability.");
   if (recommendations.length === 0) recommendations.push("No immediate remediation recommendation was generated from the configured read-only checks.");
 
-  const freshness = healthDataFreshness(result, platform, guest, patch, backup);
+  const freshness = healthDataFreshness(result, platform, guest, patch, backup, monitoring);
   return { overall, findings, recommendations, powerState, provisioningState, agentStatus, resourceHealth, platform, guest, patch, monitoring, backup, alerts, activity, resourceHistory, effectiveRoutes, effectiveNSGs, freshness };
 }
 
@@ -3092,7 +3390,7 @@ function healthCopyText(result) {
     `Memory available: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A - VM not running"}`,
     `Lowest disk free: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.lowestDiskFreePercent) : "N/A - VM not running"}`,
     `Backup: ${v.backup.protected}; last=${v.backup.lastBackupStatus}; ${healthAgeText(v.backup.lastBackupTime)}`,
-    `Patch pending: ${v.patch.available ? v.patch.totalPending : "Unknown"}`, `Monitoring: ${v.monitoring.heartbeatState}`,
+    `Patch pending: ${v.patch.available ? v.patch.totalPending : "Unknown"}`, `Regional LAW: ${v.monitoring.regionalLawName}`, `Monitoring: ${v.monitoring.heartbeatState}`,
     `Findings:`, ...v.findings.map((f) => `- ${f.severity}: ${f.message}`), `Recommendations:`, ...v.recommendations.map((r) => `- ${r}`)
   ].join("\n");
 }
@@ -3116,7 +3414,7 @@ function healthBuildVmCard(result, index) {
   const running = healthIsRunning(view.powerState);
   const runtimeMetric = (value, formatter = healthFormatPercent) => running ? formatter(value) : "N/A – VM not running";
   const patchDisplay = patch.available ? `${patch.totalPending} pending` : "Unknown";
-  const monitorDisplay = monitoring.amaInstalled && monitoring.dcrCount > 0 && monitoring.vmInsightsDataAvailable ? "Reporting" : monitoring.vmInsightsDataAvailable ? "Partial" : "Unknown";
+  const monitorDisplay = monitoring.heartbeatState === "Reporting" ? (monitoring.vmInsightsDataAvailable ? "Reporting" : "Reporting / Partial") : monitoring.heartbeatState !== "Unknown" ? monitoring.heartbeatState : monitoring.vmInsightsDataAvailable ? "Partial" : "Unknown";
 
   const findingsHtml = view.findings.length ? `<ul>${view.findings.map((finding) => `<li class="health-finding-${finding.severity.toLowerCase()}"><strong>${escapeHtml(finding.severity)}:</strong> ${escapeHtml(finding.message)}</li>`).join("")}</ul>` : '<div class="health-empty">No warning or critical findings were identified by the configured V2 rules.</div>';
 
@@ -3161,6 +3459,15 @@ function healthBuildVmCard(result, index) {
   const dcrTable = healthBuildMiniTable([
     { label: "Association", value: (r) => r.name || "Unknown" }, { label: "DCR", value: (r) => healthBasename(r.properties?.dataCollectionRuleId) }, { label: "DCR Resource ID", value: (r) => r.properties?.dataCollectionRuleId || "Unknown" }
   ], monitoring.dcrs);
+
+  const lawPerformanceTable = healthBuildMiniTable([
+    { label: "Object", value: (r) => r.ObjectName || "Unknown" },
+    { label: "Counter", value: (r) => r.CounterName || "Unknown" },
+    { label: "Instance", value: (r) => r.InstanceName || "-" },
+    { label: "Average", value: (r) => healthFormatNumber(r.Average, 2) },
+    { label: "Maximum", value: (r) => healthFormatNumber(r.Maximum, 2) },
+    { label: "Latest", value: (r) => healthFormatDateTime(r.LatestTime) }
+  ], monitoring.lawPerformance);
 
   const patchRows = Object.entries(patch.counts || {}).map(([classification, count]) => ({ classification, count }));
   const patchTable = healthBuildMiniTable([{ label: "Classification", value: (r) => r.classification }, { label: "Pending", value: (r) => r.count }], patchRows);
@@ -3223,7 +3530,7 @@ function healthBuildVmCard(result, index) {
         <div class="health-chip"><span class="health-chip-label">Network in / out</span><span class="health-chip-value">${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")} / ${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</span></div>
         <div class="health-chip"><span class="health-chip-label">Azure Backup</span><span class="health-chip-value">${escapeHtml(backup.protected)}</span><span class="health-kpi-note">${escapeHtml(backup.lastBackupStatus)} • ${escapeHtml(healthAgeText(backup.lastBackupTime))}</span></div>
         <div class="health-chip"><span class="health-chip-label">Patch assessment</span><span class="health-chip-value">${escapeHtml(patchDisplay)}</span><span class="health-kpi-note">${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}</span></div>
-        <div class="health-chip"><span class="health-chip-label">Monitoring</span><span class="health-chip-value">${escapeHtml(monitorDisplay)}</span><span class="health-kpi-note">Heartbeat: ${escapeHtml(monitoring.heartbeatState)}</span></div>
+        <div class="health-chip"><span class="health-chip-label">Monitoring</span><span class="health-chip-value">${escapeHtml(monitorDisplay)}</span><span class="health-kpi-note">${escapeHtml(monitoring.regionalLawName)} • Heartbeat: ${escapeHtml(monitoring.heartbeatState)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Data freshness</span><span class="health-chip-value">${escapeHtml(view.freshness.state)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Boot diagnostics</span><span class="health-chip-value">${escapeHtml(vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown")}</span></div>
       </div>
@@ -3246,7 +3553,7 @@ function healthBuildVmCard(result, index) {
         <details><summary>Azure alerts &amp; recent changes</summary><div class="health-details-body"><h4 class="health-section-heading">Active fired alerts</h4>${alertTable}<h4 class="health-section-heading">Azure Activity Log - last 24 hours</h4>${activityTable}</div></details>
         <details><summary>Resource Health history</summary><div class="health-details-body"><p class="field-help">Current summary: <strong>${escapeHtml(rh.summary || rh.title || view.resourceHealth)}</strong> • Context: <strong>${escapeHtml(rh.context || "Unknown")}</strong> • Reason: <strong>${escapeHtml(rh.reasonType || rh.category || "Unknown")}</strong> • Reported: <strong>${escapeHtml(healthFormatDateTime(rh.reportedTime))}</strong>${rh.resolutionETA ? ` • Resolution ETA: <strong>${escapeHtml(healthFormatDateTime(rh.resolutionETA))}</strong>` : ""}</p><h4 class="health-section-heading">Azure recommended actions</h4>${rhRecommendedHtml}<h4 class="health-section-heading">Availability history</h4>${resourceHistoryTable}</div></details>
         <details><summary>VM extensions</summary><div class="health-details-body">${extensionTable}</div></details>
-        <details><summary>Monitoring / AMA / DCR / Log Analytics</summary><div class="health-details-body"><p class="field-help">AMA: <strong>${escapeHtml(monitoring.amaInstalled ? monitoring.amaProvisioningState : "Not detected")}</strong> • DCR associations: <strong>${escapeHtml(monitoring.dcrCount)}</strong> • VM Insights data: <strong>${escapeHtml(monitoring.vmInsightsDataAvailable ? "Available" : "Unknown")}</strong> • Last heartbeat: <strong>${escapeHtml(healthFormatDateTime(monitoring.heartbeatUtc))}</strong> (${escapeHtml(healthAgeText(monitoring.heartbeatUtc))})</p>${dcrTable}</div></details>
+        <details><summary>Monitoring / Regional LAW / AMA / DCR</summary><div class="health-details-body"><p class="field-help">Regional LAW: <strong>${escapeHtml(monitoring.regionalLawName)}</strong>${monitoring.regionalLawLocation ? ` • LAW region: <strong>${escapeHtml(monitoring.regionalLawLocation)}</strong>` : ""}${monitoring.regionalLawResourceGroup ? ` • LAW RG: <strong>${escapeHtml(monitoring.regionalLawResourceGroup)}</strong>` : ""} • LAW lookup: <strong>${escapeHtml(monitoring.regionalLawLookupStatus)}</strong> • AMA: <strong>${escapeHtml(monitoring.amaInstalled ? monitoring.amaProvisioningState : "Not detected")}</strong> • DCR associations: <strong>${escapeHtml(monitoring.dcrCount)}</strong> • VM Insights data: <strong>${escapeHtml(monitoring.vmInsightsDataAvailable ? "Available" : "Unknown")}</strong> • Last heartbeat: <strong>${escapeHtml(healthFormatDateTime(monitoring.heartbeatUtc))}</strong> (${escapeHtml(healthAgeText(monitoring.heartbeatUtc))})</p><h4 class="health-section-heading">DCR associations</h4>${dcrTable}<h4 class="health-section-heading">LAW performance counters (when collected)</h4>${lawPerformanceTable}</div></details>
         <details><summary>Backup &amp; patching</summary><div class="health-details-body"><h4 class="health-section-heading">Azure Backup</h4>${backupTable}<h4 class="health-section-heading">Update Manager</h4><p class="field-help">Assessment: <strong>${escapeHtml(healthFormatDateTime(patch.lastAssessmentUtc))}</strong> (${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}) • Reboot pending: <strong>${escapeHtml(patch.rebootPending === null ? "Unknown" : String(patch.rebootPending))}</strong></p>${patchTable}</div></details>
         <details><summary>Boot diagnostics</summary><div class="health-details-body"><p class="field-help">Boot diagnostics configuration: <strong>${escapeHtml(vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown")}</strong>.</p><p class="health-inline-note">For security, this report does not return temporary screenshot/serial-log SAS URLs. Use <strong>Open VM in Azure</strong> and the Boot diagnostics blade when detailed boot artifacts are needed.</p></div></details>
         <details><summary>Recommendations</summary><div class="health-details-body"><ol class="health-recommendations">${view.recommendations.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ol></div></details>
@@ -3292,7 +3599,7 @@ function renderHealthStatus(result) {
           ["VM", item.hostname || item?.vm?.VMName || ""], ["Overall", v.overall], ["Power", v.powerState], ["Resource Health", v.resourceHealth], ["Active alerts", v.alerts.length],
           ["CPU average", healthIsRunning(v.powerState) ? healthFormatPercent(v.platform.cpu.average) : "N/A"], ["CPU maximum", healthIsRunning(v.powerState) ? healthFormatPercent(v.platform.cpu.maximum) : "N/A"],
           ["Memory available", healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A"], ["Lowest disk free", healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.lowestDiskFreePercent) : "N/A"],
-          ["Backup protection", v.backup.protected], ["Last backup status", v.backup.lastBackupStatus], ["Last backup", v.backup.lastBackupTime || "Unknown"], ["Patch pending", v.patch.available ? v.patch.totalPending : "Unknown"], ["Monitoring", v.monitoring.heartbeatState]
+          ["Backup protection", v.backup.protected], ["Last backup status", v.backup.lastBackupStatus], ["Last backup", v.backup.lastBackupTime || "Unknown"], ["Patch pending", v.patch.available ? v.patch.totalPending : "Unknown"], ["Regional LAW", v.monitoring.regionalLawName], ["Heartbeat", v.monitoring.heartbeatState]
         ];
         const csv = ["Field,Value", ...rows.map(([a,b]) => `"${String(a).replaceAll('"','""')}","${String(b).replaceAll('"','""')}"`)].join("\r\n");
         healthDownloadFile(`vm-health-${String(item.hostname || "vm").toLowerCase()}.csv`, csv, "text/csv;charset=utf-8");
@@ -3323,7 +3630,7 @@ function stopHealthStatusPolling(clearStoredRequest = false) {
 
 async function pollHealthStatus(requestId) {
   try {
-    const response = await portalFetch(
+    const response = await fetch(
       `/api/getHealthDiagnosticStatus?requestId=${encodeURIComponent(requestId)}`,
       { headers: { Accept: "application/json" }, cache: "no-store" }
     );
@@ -3338,7 +3645,9 @@ async function pollHealthStatus(requestId) {
     }
 
     if (response.status === 401) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html%23health"
+      );
       return;
     }
 
@@ -3407,7 +3716,7 @@ healthClearButton.addEventListener("click", () => {
   healthResultArea.innerHTML = "";
   updateHealthHostnameCount();
 
-  if (manualRequester) {
+  if (authenticatedPrincipal) {
     healthSubmitButton.disabled = false;
     healthSubmitButton.textContent = "Run VM health diagnostic";
   }
@@ -3442,7 +3751,7 @@ healthForm.addEventListener("submit", async (event) => {
   `;
 
   try {
-    const response = await portalFetch("/api/submitHealthDiagnostic", {
+    const response = await fetch("/api/submitHealthDiagnostic", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -3465,7 +3774,9 @@ healthForm.addEventListener("submit", async (event) => {
     }
 
     if (response.status === 401) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html%23health"
+      );
       return;
     }
 
@@ -3578,7 +3889,7 @@ backupForm.addEventListener("submit", async (event) => {
 
   try {
     const response =
-      await portalFetch(
+      await fetch(
         "/api/submitBackup",
         {
           method: "POST",
@@ -3618,7 +3929,9 @@ backupForm.addEventListener("submit", async (event) => {
     if (
       response.status === 401
     ) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
+      );
       return;
     }
 
@@ -3715,7 +4028,7 @@ snapshotForm.addEventListener("submit", async (event) => {
     "Submitting snapshot request…";
 
   try {
-    const response = await portalFetch(
+    const response = await fetch(
       "/api/submitSnapshot",
       {
         method: "POST",
@@ -3743,7 +4056,9 @@ snapshotForm.addEventListener("submit", async (event) => {
     }
 
     if (response.status === 401) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
+      );
       return;
     }
 
@@ -3802,7 +4117,7 @@ form.addEventListener("submit", async (event) => {
   submitButton.textContent = "Processing VMs…";
 
   try {
-    const response = await portalFetch("/api/submitSuppression", {
+    const response = await fetch("/api/submitSuppression", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -3825,7 +4140,9 @@ form.addEventListener("submit", async (event) => {
     }
 
     if (response.status === 401) {
-      window.location.assign("/");
+      window.location.assign(
+        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
+      );
       return;
     }
 
@@ -3845,8 +4162,9 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
-loadManualRequester()
+loadAuthenticatedUser()
   .then(() => {
+    startIdleLogoutMonitoring();
 
     loadMySnapshotRequests(
       false
@@ -3860,34 +4178,34 @@ loadManualRequester()
   console.error(error);
 
   authenticatedUserName.textContent =
-    "Unable to load requester user name";
+    "Unable to load authenticated identity";
   authenticatedProvider.textContent = error.message;
 
-  identityStatus.textContent = "User name error";
+  identityStatus.textContent = "Identity error";
   identityStatus.classList.remove("verified");
   identityStatus.classList.add("error");
 
   validationMessage.textContent =
-    "Requester user name is unavailable. Return to the start page and enter it again.";
+    "Authentication could not be verified. Sign out and sign in again.";
 
     submitButton.disabled = true;
-    submitButton.textContent = "User name required";
+    submitButton.textContent = "Authentication required";
 
     snapshotSubmitButton.disabled = true;
     snapshotSubmitButton.textContent =
-      "User name required";
+      "Authentication required";
 
     backupCheckButton.disabled = true;
     backupCheckButton.textContent =
-      "User name required";
+      "Authentication required";
 
     backupSubmitButton.disabled = true;
     backupSubmitButton.textContent =
-      "User name required";
+      "Authentication required";
 
     healthSubmitButton.disabled = true;
     healthSubmitButton.textContent =
-      "User name required";
+      "Authentication required";
   });
 
 updateHostnameCount();

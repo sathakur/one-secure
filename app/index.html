@@ -343,9 +343,9 @@
         </div>
       </div>
 
-      <div class="secure-chip" aria-label="Requester identification">
+      <div class="secure-chip" aria-label="Secure sign in">
         <span aria-hidden="true">&#128274;</span>
-        Manual requester entry
+        Microsoft Entra protected
       </div>
     </div>
   </header>
@@ -356,7 +356,9 @@
         <div class="eyebrow">Azure infrastructure operations</div>
         <h2>Controlled VM operations through one secure workspace</h2>
         <p>
-          Enter your user name to continue to the VM Operations Portal. The user name you enter will be attached to each request for tracking.
+          Sign in with your corporate Microsoft account to submit approved
+          infrastructure requests. Your authenticated identity is captured
+          automatically with each request.
         </p>
 
         <div class="capabilities" aria-label="Available portal operations">
@@ -386,32 +388,32 @@
           <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg>
         </div>
 
-        <h2 id="loginHeading">Enter your user name</h2>
-        <p>Use the same user name each time so your request history stays associated with you.</p>
+        <h2 id="loginHeading">Sign in to your account</h2>
+        <p>
+          Continue with your corporate Microsoft Entra ID account. Microsoft
+          will handle your username, password, MFA, and Conditional Access.
+        </p>
 
-        <form id="manualUserForm" autocomplete="off">
-          <div style="text-align:left; margin: 22px 0 14px;">
-            <label for="manualUserName" style="display:block; font-weight:700; margin-bottom:8px;">User Name <span style="color:#b42318;">*</span></label>
-            <input id="manualUserName" name="manualUserName" type="text" maxlength="120" required
-              placeholder="e.g. sathakur"
-              style="width:100%; box-sizing:border-box; padding:13px 14px; border:1px solid #b8c3d1; border-radius:8px; font:inherit;" />
-            <div id="manualUserError" style="min-height:20px; margin-top:7px; color:#b42318; font-size:13px;"></div>
-          </div>
-          <button class="microsoft-login" type="submit" style="width:100%; border:0; cursor:pointer;">Continue to portal</button>
-        </form>
+        <a class="microsoft-login" href="/.auth/login/aad?post_login_redirect_uri=/portal.html">
+          <span class="microsoft-logo" aria-hidden="true">
+            <span></span><span></span><span></span><span></span>
+          </span>
+          Sign in with Microsoft
+        </a>
 
         <div class="security-note">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg>
-          <span>No Microsoft Entra ID sign-in is used. The entered user name is used only as the requester identifier.</span>
+          <span>Your portal does not collect or store your Microsoft password. Credentials are entered only on Microsoft’s sign-in page.</span>
         </div>
+
+        <div class="authorized-only">Authorized users only</div>
       </div>
     </section>
   </main>
 
   <footer>
     <span>Azure VM Operations Portal</span>
-    <span>Enterprise self-service &bull; Manual requester identification</span>
+    <span>Enterprise self-service &bull; Secure authenticated access</span>
   </footer>
-  <script src="/login.js?v=20260815-manual-user"></script>
 </body>
 </html>

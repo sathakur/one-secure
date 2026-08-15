@@ -50,41 +50,38 @@ function normalizeHostnames(values) {
 }
 
 function getClientPrincipal(request) {
-  const userName = String(
-    request.headers.get("x-requester-user-name") || ""
-  ).trim();
+  const encoded =
+    request.headers.get(
+      "x-ms-client-principal"
+    );
 
-  if (!userName || userName.length > 120) {
+  if (!encoded) return null;
+
+  try {
+    return JSON.parse(
+      Buffer.from(encoded, "base64")
+        .toString("utf8")
+    );
+  } catch {
     return null;
   }
-
-  if (!/^[A-Za-z0-9._@\\-]+$/.test(userName)) {
-    return null;
-  }
-
-  return {
-    identityProvider: "manual",
-    userRoles: ["authenticated"],
-    userDetails: userName,
-    userId: userName.toLowerCase()
-  };
 }
 
 function validateAuthenticatedPrincipal(
   principal
 ) {
   if (!principal) {
-    return "A requester user name is required.";
+    return "Microsoft Entra authentication is required.";
   }
 
   if (
-    principal.identityProvider !== "manual" ||
+    principal.identityProvider !== "aad" ||
     !Array.isArray(principal.userRoles) ||
     !principal.userRoles.includes(
       "authenticated"
     )
   ) {
-    return "A valid requester user name is required.";
+    return "A valid Microsoft Entra authenticated session is required.";
   }
 
   if (
@@ -95,7 +92,7 @@ function validateAuthenticatedPrincipal(
       principal.userId || ""
     ).trim()
   ) {
-    return "The requester user name could not be resolved.";
+    return "The authenticated requester identity could not be resolved.";
   }
 
   return "";

@@ -25,7 +25,7 @@ function normalizeUserId(userId) {
 
   if (!value) {
     throw new Error(
-      "Requester user name is required for backup request history."
+      "Authenticated user ID is required for backup request history."
     );
   }
 

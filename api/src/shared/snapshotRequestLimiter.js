@@ -24,7 +24,7 @@ function buildRateLimitBlobUrl(userId) {
 
   if (!normalizedUserId) {
     throw new Error(
-      "Requester user name is required for snapshot request limiting."
+      "Authenticated user ID is required for snapshot request limiting."
     );
   }
 
