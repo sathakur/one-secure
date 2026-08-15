@@ -43,7 +43,7 @@ function isAuthenticated(
   return Boolean(
     principal &&
     principal.identityProvider ===
-      "aad" &&
+      "manual" &&
     Array.isArray(
       principal.userRoles
     ) &&
