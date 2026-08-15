@@ -2834,6 +2834,8 @@ function healthReadLawPerformance(result) {
 function healthReadRegionalLaw(result) {
   const regional = result?.regionalLaw || {};
   const workspace = regional?.workspace || {};
+  const primaryWorkspace = regional?.primaryWorkspace || {};
+  const fallbackWorkspace = regional?.fallbackWorkspace || {};
   return {
     mappedName: String(regional?.mappedName || ""),
     workspaceName: String(workspace?.WorkspaceName || regional?.mappedName || ""),
@@ -2843,16 +2845,24 @@ function healthReadRegionalLaw(result) {
     workspaceSubscriptionId: String(workspace?.WorkspaceSubscriptionId || ""),
     workspaceLocation: String(workspace?.WorkspaceLocation || ""),
     matchCount: Number(regional?.matchCount || 0),
-    lookupStatus: String(regional?.lookupStatus || "Unknown")
+    lookupStatus: String(regional?.lookupStatus || "Unknown"),
+    fallbackUsed: regional?.fallbackUsed === true,
+    effectiveSource: String(regional?.effectiveSource || "Primary regional LAW"),
+    fallbackReason: String(regional?.fallbackReason || ""),
+    primaryMappedName: String(regional?.primaryMappedName || ""),
+    primaryWorkspaceName: String(primaryWorkspace?.WorkspaceName || regional?.primaryMappedName || ""),
+    fallbackConfiguredName: String(regional?.fallbackConfiguredName || ""),
+    fallbackWorkspaceName: String(fallbackWorkspace?.WorkspaceName || regional?.fallbackConfiguredName || "")
   };
 }
 
 function healthReadGuest(result) {
   const rows = healthReadGuestRows(result);
   const memoryRow = rows.find((row) => row.Namespace === "Memory" && row.Name === "AvailableMB");
+  const memoryPercentRow = rows.find((row) => row.Namespace === "Memory" && row.Name === "AvailablePercent");
   let availableMemoryMb = healthFiniteNumber(memoryRow?.Value);
-  let availableMemoryPercent = null;
-  if (memoryRow) {
+  let availableMemoryPercent = healthFiniteNumber(memoryPercentRow?.Value);
+  if (availableMemoryPercent === null && memoryRow) {
     const tags = healthParseJson(memoryRow.Tags);
     const totalMemoryMb = healthFiniteNumber(tags["vm.azm.ms/memorySizeMB"]);
     if (availableMemoryMb !== null && totalMemoryMb !== null && totalMemoryMb > 0) availableMemoryPercent = (availableMemoryMb / totalMemoryMb) * 100;
@@ -2870,12 +2880,14 @@ function healthReadGuest(result) {
   }
   const disks = [...disksByInstance.values()];
   const freePercents = disks.map((disk) => disk.freePercent).filter((value) => value !== null);
+  const freeMbs = disks.map((disk) => disk.freeMb).filter((value) => value !== null);
   const latestGuestUtc = rows.map((row) => row.TimeGenerated).filter(Boolean).sort((a,b) => new Date(b)-new Date(a))[0] || null;
 
   return {
     availableMemoryMb,
     availableMemoryPercent,
     lowestDiskFreePercent: freePercents.length ? Math.min(...freePercents) : null,
+    lowestDiskFreeMb: freeMbs.length ? Math.min(...freeMbs) : null,
     disks,
     heartbeatUtc: null,
     latestGuestUtc,
@@ -2904,6 +2916,40 @@ function healthReadExtensions(result) {
   return Array.isArray(result?.extensions?.value) ? result.extensions.value : [];
 }
 
+function healthReadLawQueryDiagnostics(result) {
+  const d = result?.lawQueryDiagnostics || {};
+  const clean = (value) => String(value ?? "");
+  const number = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  };
+  return {
+    workspaceId: clean(d.workspaceId),
+    workspaceName: clean(d.workspaceName),
+    heartbeatStatus: clean(d.heartbeatStatus || "Unknown"),
+    heartbeatHttpStatus: number(d.heartbeatHttpStatus),
+    heartbeatErrorCode: clean(d.heartbeatErrorCode),
+    heartbeatErrorMessage: clean(d.heartbeatErrorMessage),
+    guestStatus: clean(d.guestStatus || "Unknown"),
+    guestHttpStatus: number(d.guestHttpStatus),
+    guestErrorCode: clean(d.guestErrorCode),
+    guestErrorMessage: clean(d.guestErrorMessage),
+    performanceStatus: clean(d.performanceStatus || "Unknown"),
+    performanceHttpStatus: number(d.performanceHttpStatus),
+    performanceErrorCode: clean(d.performanceErrorCode),
+    performanceErrorMessage: clean(d.performanceErrorMessage),
+    fallbackUsed: d.fallbackUsed === true,
+    primaryWorkspaceName: clean(d.primaryWorkspaceName),
+    fallbackWorkspaceName: clean(d.fallbackWorkspaceName),
+    primaryHeartbeatStatus: clean(d.primaryHeartbeatStatus || "Unknown"),
+    primaryHeartbeatHttpStatus: number(d.primaryHeartbeatHttpStatus),
+    primaryGuestStatus: clean(d.primaryGuestStatus || "Unknown"),
+    primaryGuestHttpStatus: number(d.primaryGuestHttpStatus),
+    primaryPerformanceStatus: clean(d.primaryPerformanceStatus || "Unknown"),
+    primaryPerformanceHttpStatus: number(d.primaryPerformanceHttpStatus)
+  };
+}
+
 function healthReadMonitoring(result, guest) {
   const extensions = healthReadExtensions(result);
   const amaExtension = extensions.find((extension) => {
@@ -2913,6 +2959,7 @@ function healthReadMonitoring(result, guest) {
   const dcrs = Array.isArray(result?.dcrAssociations?.value) ? result.dcrAssociations.value : [];
   const heartbeat = healthReadHeartbeat(result);
   const regionalLaw = healthReadRegionalLaw(result);
+  const lawDiagnostics = healthReadLawQueryDiagnostics(result);
   const heartbeatUtc = heartbeat.heartbeatUtc || guest.heartbeatUtc || null;
   const heartbeatAge = healthAgeMinutes(heartbeatUtc);
   return {
@@ -2930,7 +2977,13 @@ function healthReadMonitoring(result, guest) {
     regionalLawResourceGroup: regionalLaw.workspaceResourceGroup || "",
     regionalLawMatchCount: regionalLaw.matchCount,
     regionalLawLookupStatus: regionalLaw.lookupStatus,
-    lawPerformance: healthReadLawPerformance(result)
+    regionalLawFallbackUsed: regionalLaw.fallbackUsed,
+    regionalLawEffectiveSource: regionalLaw.effectiveSource,
+    regionalLawFallbackReason: regionalLaw.fallbackReason,
+    regionalLawPrimaryName: regionalLaw.primaryWorkspaceName || regionalLaw.primaryMappedName,
+    regionalLawFallbackName: regionalLaw.fallbackWorkspaceName || regionalLaw.fallbackConfiguredName,
+    lawPerformance: healthReadLawPerformance(result),
+    lawDiagnostics
   };
 }
 
@@ -3064,9 +3117,17 @@ function deriveVmHealth(result) {
   if (!monitoring.amaInstalled) healthAddFinding(findings, "Warning", "AMA_MISSING", "Azure Monitor Agent was not detected in the VM extension list.");
   if (monitoring.dcrCount < 1) healthAddFinding(findings, "Warning", "DCR_MISSING", "No Data Collection Rule association was returned for this VM.");
   if (monitoring.regionalLawName === "Unknown") healthAddFinding(findings, "Warning", "REGIONAL_LAW_UNKNOWN", `No regional Log Analytics workspace mapping was resolved for Azure region ${result?.vm?.Location || "Unknown"}.`);
-  if (!monitoring.vmInsightsDataAvailable) healthAddFinding(findings, "Warning", "GUEST_TELEMETRY_UNKNOWN", `VM Insights guest telemetry was not returned from regional LAW ${monitoring.regionalLawName}; memory and logical-disk health remain Unknown.`);
+  if (monitoring.regionalLawFallbackUsed) healthAddFinding(findings, "Warning", "LAW_FALLBACK_USED", `No VM telemetry was found in primary LAW ${monitoring.regionalLawPrimaryName || "central-law-weu-law"}; last-resort LAW ${monitoring.regionalLawName} was used.`);
+  if (!monitoring.vmInsightsDataAvailable) healthAddFinding(findings, "Warning", "GUEST_TELEMETRY_UNKNOWN", `VM Insights guest telemetry was not returned from effective LAW ${monitoring.regionalLawName}; memory and logical-disk health remain Unknown.`);
   if (running && monitoring.heartbeatAgeMinutes === null) healthAddFinding(findings, "Warning", "HEARTBEAT_UNKNOWN", `No Heartbeat record was returned from regional LAW ${monitoring.regionalLawName}.`);
   if (monitoring.heartbeatAgeMinutes !== null && monitoring.heartbeatAgeMinutes > 30) healthAddFinding(findings, "Warning", "HEARTBEAT_STALE", `Latest VM Insights heartbeat is ${healthAgeText(monitoring.heartbeatUtc)}.`);
+
+  const lawDiag = monitoring.lawDiagnostics || {};
+  if (lawDiag.heartbeatStatus && lawDiag.heartbeatStatus !== "Succeeded") {
+    const http = lawDiag.heartbeatHttpStatus ? ` HTTP ${lawDiag.heartbeatHttpStatus}` : "";
+    const code = lawDiag.heartbeatErrorCode ? ` ${lawDiag.heartbeatErrorCode}` : "";
+    healthAddFinding(findings, "Warning", "LAW_HEARTBEAT_QUERY_FAILED", `Regional LAW Heartbeat query failed.${http}${code}`);
+  }
 
   const failedSources = Object.entries(result?.actionStatus || {}).filter(([, status]) => status !== "Succeeded").map(([name]) => name);
   if (failedSources.length) healthAddFinding(findings, "Warning", "DATA_SOURCE_UNAVAILABLE", `${failedSources.length} diagnostic data source(s) were unavailable: ${failedSources.join(", ")}.`);
@@ -3079,7 +3140,12 @@ function deriveVmHealth(result) {
   if (!running) recommendations.push("Verify whether the VM shutdown/deallocation was planned. Performance telemetry is shown as N/A while the VM is not running.");
   if (/unavailable|degraded/i.test(resourceHealth)) recommendations.push("Review Resource Health history and any recommended Azure actions for the current availability event.");
   if (alerts.length) recommendations.push("Review the active Azure Monitor alerts and resolve the highest-severity fired condition first.");
-  if (!monitoring.vmInsightsDataAvailable) recommendations.push(`Validate VM Insights / InsightsMetrics collection in regional LAW ${monitoring.regionalLawName} before relying on guest memory/disk health.`);
+  if ([401, 403].includes(Number(monitoring.lawDiagnostics?.heartbeatHttpStatus || 0))) {
+    if (Number(monitoring.lawDiagnostics?.heartbeatHttpStatus) === 403) recommendations.push(`Grant the Health Logic App managed identity Log Analytics Reader/query access on regional LAW ${monitoring.regionalLawName}.`);
+    else recommendations.push(`The regional LAW query returned HTTP 401. Verify the Logic App managed-identity authentication/audience for the Log Analytics API.`);
+  }
+  if (monitoring.regionalLawFallbackUsed) recommendations.push(`Primary LAW ${monitoring.regionalLawPrimaryName || "central-law-weu-law"} had no matching VM telemetry, so ${monitoring.regionalLawName} was queried as the last-resort fallback. Confirm whether this VM is expected to report to the fallback LAW.`);
+  if (!monitoring.vmInsightsDataAvailable) recommendations.push(`Validate VM Insights / InsightsMetrics collection in effective LAW ${monitoring.regionalLawName} before relying on guest memory/disk health.`);
   if (monitoring.heartbeatAgeMinutes !== null && monitoring.heartbeatAgeMinutes > 30) recommendations.push("Investigate the stale VM Insights heartbeat: check AMA extension state, DCR association, outbound connectivity and workspace ingestion.");
   if (patch.criticalSecurityCount > 0) recommendations.push("Review pending Critical/Security patches in Azure Update Manager and schedule remediation through the approved patch process.");
   if (backup.protected.toLowerCase() !== "protected" || /unhealthy|failed/i.test(backup.lastBackupStatus)) recommendations.push("Review Azure Backup protection and the latest backup job before relying on recovery-point availability.");
@@ -3131,7 +3197,7 @@ function healthCopyText(result) {
   const v = deriveVmHealth(result);
   const vm = result?.vm || {};
   return [
-    `VM Health Diagnostic V2`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
+    `VM Health Diagnostic V2.4`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
     `Power: ${v.powerState}`, `Resource Health: ${v.resourceHealth}`, `Active alerts: ${v.alerts.length}`,
     `CPU avg/max: ${healthIsRunning(v.powerState) ? `${healthFormatPercent(v.platform.cpu.average)} / ${healthFormatPercent(v.platform.cpu.maximum)}` : "N/A - VM not running"}`,
     `Memory available: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A - VM not running"}`,
@@ -3162,6 +3228,8 @@ function healthBuildVmCard(result, index) {
   const runtimeMetric = (value, formatter = healthFormatPercent) => running ? formatter(value) : "N/A – VM not running";
   const patchDisplay = patch.available ? `${patch.totalPending} pending` : "Unknown";
   const monitorDisplay = monitoring.heartbeatState === "Reporting" ? (monitoring.vmInsightsDataAvailable ? "Reporting" : "Reporting / Partial") : monitoring.heartbeatState !== "Unknown" ? monitoring.heartbeatState : monitoring.vmInsightsDataAvailable ? "Partial" : "Unknown";
+  const memoryDisplay = !running ? "N/A – VM not running" : guest.availableMemoryPercent !== null ? healthFormatPercent(guest.availableMemoryPercent) : guest.availableMemoryMb !== null ? `${healthFormatNumber(guest.availableMemoryMb, 0)} MB` : "Unknown";
+  const diskDisplay = !running ? "N/A – VM not running" : guest.lowestDiskFreePercent !== null ? healthFormatPercent(guest.lowestDiskFreePercent) : guest.lowestDiskFreeMb !== null ? `${healthFormatNumber(guest.lowestDiskFreeMb, 0)} MB` : "Unknown";
 
   const findingsHtml = view.findings.length ? `<ul>${view.findings.map((finding) => `<li class="health-finding-${finding.severity.toLowerCase()}"><strong>${escapeHtml(finding.severity)}:</strong> ${escapeHtml(finding.message)}</li>`).join("")}</ul>` : '<div class="health-empty">No warning or critical findings were identified by the configured V2 rules.</div>';
 
@@ -3272,8 +3340,8 @@ function healthBuildVmCard(result, index) {
         <div class="health-chip"><span class="health-chip-label">Resource Health</span><span class="health-chip-value">${escapeHtml(view.resourceHealth)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Active alerts</span><span class="health-chip-value">${escapeHtml(view.alerts.length)}</span></div>
         <div class="health-chip"><span class="health-chip-label">CPU avg / max</span><span class="health-chip-value">${escapeHtml(runtimeMetric(view.platform.cpu.average))} / ${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</span></div>
-        <div class="health-chip"><span class="health-chip-label">Memory available</span><span class="health-chip-value">${escapeHtml(runtimeMetric(guest.availableMemoryPercent))}</span></div>
-        <div class="health-chip"><span class="health-chip-label">Lowest disk free</span><span class="health-chip-value">${escapeHtml(runtimeMetric(guest.lowestDiskFreePercent))}</span></div>
+        <div class="health-chip"><span class="health-chip-label">Memory available</span><span class="health-chip-value">${escapeHtml(memoryDisplay)}</span></div>
+        <div class="health-chip"><span class="health-chip-label">Lowest disk free</span><span class="health-chip-value">${escapeHtml(diskDisplay)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Network in / out</span><span class="health-chip-value">${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")} / ${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</span></div>
         <div class="health-chip"><span class="health-chip-label">Azure Backup</span><span class="health-chip-value">${escapeHtml(backup.protected)}</span><span class="health-kpi-note">${escapeHtml(backup.lastBackupStatus)} • ${escapeHtml(healthAgeText(backup.lastBackupTime))}</span></div>
         <div class="health-chip"><span class="health-chip-label">Patch assessment</span><span class="health-chip-value">${escapeHtml(patchDisplay)}</span><span class="health-kpi-note">${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}</span></div>
@@ -3290,7 +3358,7 @@ function healthBuildVmCard(result, index) {
       </div>
 
       <div class="health-findings"><h4>Findings</h4>${findingsHtml}</div>
-      ${!running ? '<div class="health-note">Performance, guest memory and logical-disk utilization are shown as N/A while the VM is not running. Zero is not used as a substitute for unavailable telemetry.</div>' : !guest.dataAvailable ? '<div class="health-note">Guest memory and logical-disk values are Unknown because VM Insights / InsightsMetrics data was not returned from the configured Log Analytics workspace.</div>' : ""}
+      ${!running ? '<div class="health-note">Performance, guest memory and logical-disk utilization are shown as N/A while the VM is not running. Zero is not used as a substitute for unavailable telemetry.</div>' : !guest.dataAvailable ? '<div class="health-note">Guest memory and logical-disk values are Unknown because neither InsightsMetrics nor the required Perf counters were returned from the effective Log Analytics workspace.</div>' : ""}
 
       <div class="health-details">
         <details><summary>VM configuration &amp; runtime</summary><div class="health-details-body">${healthBuildConfiguration(result, view)}</div></details>
@@ -3300,7 +3368,7 @@ function healthBuildVmCard(result, index) {
         <details><summary>Azure alerts &amp; recent changes</summary><div class="health-details-body"><h4 class="health-section-heading">Active fired alerts</h4>${alertTable}<h4 class="health-section-heading">Azure Activity Log - last 24 hours</h4>${activityTable}</div></details>
         <details><summary>Resource Health history</summary><div class="health-details-body"><p class="field-help">Current summary: <strong>${escapeHtml(rh.summary || rh.title || view.resourceHealth)}</strong> • Context: <strong>${escapeHtml(rh.context || "Unknown")}</strong> • Reason: <strong>${escapeHtml(rh.reasonType || rh.category || "Unknown")}</strong> • Reported: <strong>${escapeHtml(healthFormatDateTime(rh.reportedTime))}</strong>${rh.resolutionETA ? ` • Resolution ETA: <strong>${escapeHtml(healthFormatDateTime(rh.resolutionETA))}</strong>` : ""}</p><h4 class="health-section-heading">Azure recommended actions</h4>${rhRecommendedHtml}<h4 class="health-section-heading">Availability history</h4>${resourceHistoryTable}</div></details>
         <details><summary>VM extensions</summary><div class="health-details-body">${extensionTable}</div></details>
-        <details><summary>Monitoring / Regional LAW / AMA / DCR</summary><div class="health-details-body"><p class="field-help">Regional LAW: <strong>${escapeHtml(monitoring.regionalLawName)}</strong>${monitoring.regionalLawLocation ? ` • LAW region: <strong>${escapeHtml(monitoring.regionalLawLocation)}</strong>` : ""}${monitoring.regionalLawResourceGroup ? ` • LAW RG: <strong>${escapeHtml(monitoring.regionalLawResourceGroup)}</strong>` : ""} • LAW lookup: <strong>${escapeHtml(monitoring.regionalLawLookupStatus)}</strong> • AMA: <strong>${escapeHtml(monitoring.amaInstalled ? monitoring.amaProvisioningState : "Not detected")}</strong> • DCR associations: <strong>${escapeHtml(monitoring.dcrCount)}</strong> • VM Insights data: <strong>${escapeHtml(monitoring.vmInsightsDataAvailable ? "Available" : "Unknown")}</strong> • Last heartbeat: <strong>${escapeHtml(healthFormatDateTime(monitoring.heartbeatUtc))}</strong> (${escapeHtml(healthAgeText(monitoring.heartbeatUtc))})</p><h4 class="health-section-heading">DCR associations</h4>${dcrTable}<h4 class="health-section-heading">LAW performance counters (when collected)</h4>${lawPerformanceTable}</div></details>
+        <details><summary>Monitoring / Regional LAW / AMA / DCR</summary><div class="health-details-body"><p class="field-help">Effective LAW: <strong>${escapeHtml(monitoring.regionalLawName)}</strong>${monitoring.regionalLawFallbackUsed ? ` • <strong>Fallback used</strong>: ${escapeHtml(monitoring.regionalLawPrimaryName || "central-law-weu-law")} → ${escapeHtml(monitoring.regionalLawFallbackName || monitoring.regionalLawName)}` : ` • Primary LAW used: <strong>${escapeHtml(monitoring.regionalLawPrimaryName || monitoring.regionalLawName)}</strong>`}${monitoring.regionalLawLocation ? ` • LAW region: <strong>${escapeHtml(monitoring.regionalLawLocation)}</strong>` : ""}${monitoring.regionalLawResourceGroup ? ` • LAW RG: <strong>${escapeHtml(monitoring.regionalLawResourceGroup)}</strong>` : ""} • LAW lookup: <strong>${escapeHtml(monitoring.regionalLawLookupStatus)}</strong> • Workspace ID: <strong>${escapeHtml(monitoring.regionalLawWorkspaceId || "Unknown")}</strong> • AMA: <strong>${escapeHtml(monitoring.amaInstalled ? monitoring.amaProvisioningState : "Not detected")}</strong> • DCR associations: <strong>${escapeHtml(monitoring.dcrCount)}</strong> • VM Insights data: <strong>${escapeHtml(monitoring.vmInsightsDataAvailable ? "Available" : "Unknown")}</strong> • Last heartbeat: <strong>${escapeHtml(healthFormatDateTime(monitoring.heartbeatUtc))}</strong> (${escapeHtml(healthAgeText(monitoring.heartbeatUtc))})</p>${monitoring.regionalLawFallbackUsed ? `<p class="health-inline-note"><strong>Last-resort LAW fallback was used.</strong> No Heartbeat, InsightsMetrics or Perf rows matching this VM were returned from the primary regional LAW.</p>` : ""}<h4 class="health-section-heading">LAW query diagnostics</h4><div class="health-table-wrap"><table class="health-table"><thead><tr><th>Source</th><th>Query</th><th>Logic App status</th><th>HTTP</th><th>Error</th></tr></thead><tbody>${monitoring.regionalLawFallbackUsed ? `<tr><td>Primary</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceHttpStatus || "-")}</td><td>-</td></tr>` : ""}<tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatErrorCode || monitoring.lawDiagnostics?.heartbeatErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestErrorCode || monitoring.lawDiagnostics?.guestErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceErrorCode || monitoring.lawDiagnostics?.performanceErrorMessage || "-")}</td></tr></tbody></table></div><h4 class="health-section-heading">DCR associations</h4>${dcrTable}<h4 class="health-section-heading">LAW performance counters (when collected)</h4>${lawPerformanceTable}</div></details>
         <details><summary>Backup &amp; patching</summary><div class="health-details-body"><h4 class="health-section-heading">Azure Backup</h4>${backupTable}<h4 class="health-section-heading">Update Manager</h4><p class="field-help">Assessment: <strong>${escapeHtml(healthFormatDateTime(patch.lastAssessmentUtc))}</strong> (${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}) • Reboot pending: <strong>${escapeHtml(patch.rebootPending === null ? "Unknown" : String(patch.rebootPending))}</strong></p>${patchTable}</div></details>
         <details><summary>Boot diagnostics</summary><div class="health-details-body"><p class="field-help">Boot diagnostics configuration: <strong>${escapeHtml(vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown")}</strong>.</p><p class="health-inline-note">For security, this report does not return temporary screenshot/serial-log SAS URLs. Use <strong>Open VM in Azure</strong> and the Boot diagnostics blade when detailed boot artifacts are needed.</p></div></details>
         <details><summary>Recommendations</summary><div class="health-details-body"><ol class="health-recommendations">${view.recommendations.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ol></div></details>

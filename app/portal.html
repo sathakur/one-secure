@@ -200,7 +200,7 @@
         </section>
         <aside class="side-stack">
           <section class="card requirements-panel" aria-labelledby="healthRequirementsHeading">
-            <div class="requirements-heading"><div><span class="requirements-label">What is checked</span><h2 id="healthRequirementsHeading">VM Health Diagnostic V2.1</h2></div><span class="requirements-status">Expanded</span></div>
+            <div class="requirements-heading"><div><span class="requirements-label">What is checked</span><h2 id="healthRequirementsHeading">VM Health Diagnostic V2.4</h2></div><span class="requirements-status">Expanded</span></div>
             <div class="requirements-grid">
               <article class="requirement-card"><div class="requirement-number">01</div><div><h3>Azure platform</h3><p>VM discovery, configuration, power/provisioning state, current + historical Resource Health, VM Agent, extensions, active Azure alerts and recent Azure changes.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">02</div><div><h3>Performance &amp; storage</h3><p>CPU trend, network traffic, disk I/O/latency/utilization, available memory, logical-disk free space, attached Azure managed disks and data freshness.</p></div></article>
@@ -208,7 +208,7 @@
               <article class="requirement-card"><div class="requirement-number">04</div><div><h3>Protection &amp; patching</h3><p>Detailed Azure Backup state, last backup/recovery point, Update Manager assessment, boot diagnostics state, recommendations and export/copy support.</p></div></article>
             </div>
           </section>
-          <section class="policy-card"><div class="policy-title">🛡 Diagnostic-only access</div><p>Regional LAW selection is automatic. West Europe VMs use <strong>central-law-weu-law</strong>. Heartbeat is queried independently from the <strong>Heartbeat</strong> table; guest memory and logical-disk values use <strong>InsightsMetrics</strong>. Missing telemetry is reported as <strong>Unknown</strong>, never as 0% or Healthy. Health Score is intentionally not used.</p></section>
+          <section class="policy-card"><div class="policy-title">🛡 Diagnostic-only access</div><p>Regional LAW selection is automatic. West Europe VMs first use <strong>central-law-weu-law</strong>. If no VM telemetry is found there, the diagnostic makes one last-resort attempt against <strong>test-prod-westeu-001-log</strong>. Heartbeat is queried independently from the <strong>Heartbeat</strong> table; guest memory and logical-disk values use <strong>InsightsMetrics</strong>. Missing telemetry is reported as <strong>Unknown</strong>, never as 0% or Healthy. Health Score is intentionally not used.</p></section>
         </aside>
       </div>
       <section id="healthResultArea" class="card result-card health-result-card" hidden aria-live="polite"></section>
@@ -216,6 +216,6 @@
 
     <footer class="portal-footer"><span>Azure VM Operations Portal</span><span>Enterprise self-service • Manual requester identification</span></footer>
   </main>
-  <script src="/app.js?v=20260815-vm-health-v21-regional-law-no-entra"></script>
+  <script src="/app.js?v=20260815-vm-health-v24-law-mem-disk-perf-fallback-no-entra"></script>
 </body>
 </html>
