@@ -16,20 +16,30 @@ function jsonResponse(status, body) {
 }
 
 function getClientPrincipal(request) {
-  const encoded = request.headers.get("x-ms-client-principal");
-  if (!encoded) return null;
+  const userName = String(
+    request.headers.get("x-requester-user-name") || ""
+  ).trim();
 
-  try {
-    return JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-  } catch {
+  if (!userName || userName.length > 120) {
     return null;
   }
+
+  if (!/^[A-Za-z0-9._@\\-]+$/.test(userName)) {
+    return null;
+  }
+
+  return {
+    identityProvider: "manual",
+    userRoles: ["authenticated"],
+    userDetails: userName,
+    userId: userName.toLowerCase()
+  };
 }
 
 function isAuthenticated(principal) {
   return Boolean(
     principal &&
-      principal.identityProvider === "aad" &&
+      principal.identityProvider === "manual" &&
       Array.isArray(principal.userRoles) &&
       principal.userRoles.includes("authenticated") &&
       String(principal.userId || "").trim()
@@ -48,7 +58,7 @@ app.http("getHealthDiagnosticStatus", {
       return jsonResponse(401, {
         success: false,
         status: "Unauthorized",
-        message: "Microsoft Entra authentication is required."
+        message: "A requester user name is required."
       });
     }
 

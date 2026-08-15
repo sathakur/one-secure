@@ -25,28 +25,25 @@ function jsonResponse(
   };
 }
 
-function getClientPrincipal(
-  request
-) {
-  const encoded =
-    request.headers.get(
-      "x-ms-client-principal"
-    );
+function getClientPrincipal(request) {
+  const userName = String(
+    request.headers.get("x-requester-user-name") || ""
+  ).trim();
 
-  if (!encoded) {
+  if (!userName || userName.length > 120) {
     return null;
   }
 
-  try {
-    return JSON.parse(
-      Buffer.from(
-        encoded,
-        "base64"
-      ).toString("utf8")
-    );
-  } catch {
+  if (!/^[A-Za-z0-9._@\\-]+$/.test(userName)) {
     return null;
   }
+
+  return {
+    identityProvider: "manual",
+    userRoles: ["authenticated"],
+    userDetails: userName,
+    userId: userName.toLowerCase()
+  };
 }
 
 function isAuthenticated(
@@ -140,7 +137,7 @@ app.http("getMyBackupRequests", {
           status:
             "Unauthorized",
           message:
-            "Microsoft Entra authentication is required."
+            "A requester user name is required."
         }
       );
     }
