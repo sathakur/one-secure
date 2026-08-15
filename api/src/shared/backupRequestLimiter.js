@@ -24,7 +24,7 @@ function buildRateLimitBlobUrl(userId) {
 
   if (!normalizedUserId) {
     throw new Error(
-      "Authenticated user ID is required for backup request limiting."
+      "Requester user name is required for backup request limiting."
     );
   }
 

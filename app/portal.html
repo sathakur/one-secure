@@ -20,13 +20,13 @@
 
       <section class="identity-panel" aria-labelledby="identityHeading">
         <div class="identity-details">
-          <span id="identityHeading" class="identity-label">Authenticated requester</span>
-          <strong id="authenticatedUserName">Loading your identity…</strong>
-          <span id="authenticatedProvider" class="identity-provider">Microsoft Entra ID</span>
+          <span id="identityHeading" class="identity-label">Requester</span>
+          <strong id="authenticatedUserName">Loading user name…</strong>
+          <span id="authenticatedProvider" class="identity-provider">Manual user name</span>
         </div>
         <div class="identity-actions">
-          <span id="identityStatus" class="identity-status">Verifying</span>
-          <a class="sign-out-link" href="/.auth/logout?post_logout_redirect_uri=/signed-out.html">Sign out</a>
+          <span id="identityStatus" class="identity-status">Ready</span>
+          <a class="sign-out-link" href="/">Change user</a>
         </div>
       </section>
     </div>
@@ -37,7 +37,7 @@
       <div>
         <span class="request-hero-eyebrow">Azure Infrastructure Operations</span>
         <h2 id="requestHeroTitle">Manage VM operational requests</h2>
-        <p>Submit controlled alert suppression, managed-disk snapshot, on-demand backup, and read-only VM health diagnostics through one authenticated workspace.</p>
+        <p>Submit controlled alert suppression, managed-disk snapshot, on-demand backup, and read-only VM health diagnostics through one self-service workspace.</p>
       </div>
       <div class="service-chip"><span class="service-dot"></span>Service available <span>•</span> CET/CEST</div>
     </section>
@@ -62,7 +62,7 @@
         <section class="card request-card">
           <div class="card-head">
             <div><h2>New alert suppression request</h2><p>Temporarily suppress monitoring notifications for approved maintenance activity.</p></div>
-            <span class="request-badge">Authenticated request</span>
+            <span class="request-badge">Tracked request</span>
           </div>
           <form id="suppressionForm" class="form-body" novalidate>
             <div class="section-label">VM scope</div>
@@ -80,7 +80,7 @@
               <div class="field full-grid"><label for="reason">Reason <span class="required">*</span></label><textarea id="reason" rows="3" maxlength="500" placeholder="Monthly Windows patching" required></textarea></div>
             </div>
             <div id="validationMessage" class="validation-message" role="alert"></div>
-            <div class="actions"><div class="secure-note">🔒 Requester identity is captured automatically</div><div class="action-buttons"><button id="clearButton" type="button" class="secondary">Clear</button><button id="submitButton" type="submit" disabled>Verifying identity…</button></div></div>
+            <div class="actions"><div class="secure-note">👤 Requester user name is attached automatically</div><div class="action-buttons"><button id="clearButton" type="button" class="secondary">Clear</button><button id="submitButton" type="submit" disabled>Verifying identity…</button></div></div>
           </form>
         </section>
 
@@ -93,7 +93,7 @@
               <article class="requirement-card"><div class="requirement-number">03</div><div><h3>Maximum duration</h3><p>The suppression window must not exceed 24 hours.</p></div></article>
             </div>
           </section>
-          <section class="policy-card"><div class="policy-title">🛡 Controlled operation</div><p>Requests are associated with your <strong>Microsoft Entra ID</strong> identity and processed using least-privilege automation.</p></section>
+          <section class="policy-card"><div class="policy-title">🛡 Controlled operation</div><p>Requests are associated with the <strong>user name entered on the start page</strong> and processed using least-privilege automation.</p></section>
         </aside>
       </div>
       <section id="resultArea" class="card result-card" hidden aria-live="polite"></section>
@@ -102,11 +102,11 @@
     <section id="snapshotPanel" class="operation-panel" role="tabpanel" aria-labelledby="snapshotTabButton" hidden>
       <div class="workspace-grid">
         <section class="card request-card">
-          <div class="card-head"><div><h2>New VM snapshot request</h2><p>Create controlled managed-disk recovery points for approved operational activity.</p></div><span class="request-badge">Authenticated request</span></div>
+          <div class="card-head"><div><h2>New VM snapshot request</h2><p>Create controlled managed-disk recovery points for approved operational activity.</p></div><span class="request-badge">Tracked request</span></div>
           <div class="information-note" role="note"><strong>Important:</strong> Snapshots created while a VM is running are managed-disk snapshots and should be treated as crash-consistent. VM memory is not captured.</div>
           <form id="snapshotForm" class="form-body" novalidate>
             <div class="section-label">VM scope</div>
-            <div class="field full"><label for="snapshotHostnames">VM hostnames <span class="required">*</span></label><textarea id="snapshotHostnames" rows="8" maxlength="5000" placeholder="WINVM001&#10;WINVM002&#10;WINVM003" required></textarea><div class="help-row"><span>One hostname per line, or separate with commas or semicolons. Maximum 5 unique hostnames per snapshot request.</span><span id="snapshotHostnameCount" class="counter">0 / 5</span></div><div class="field-help quota-help">Snapshot quota: maximum 3 requests per authenticated user in any rolling 24-hour period.</div></div>
+            <div class="field full"><label for="snapshotHostnames">VM hostnames <span class="required">*</span></label><textarea id="snapshotHostnames" rows="8" maxlength="5000" placeholder="WINVM001&#10;WINVM002&#10;WINVM003" required></textarea><div class="help-row"><span>One hostname per line, or separate with commas or semicolons. Maximum 5 unique hostnames per snapshot request.</span><span id="snapshotHostnameCount" class="counter">0 / 5</span></div><div class="field-help quota-help">Snapshot quota: maximum 3 requests per entered user name in any rolling 24-hour period.</div></div>
             <div class="section-label section-spacer">Snapshot &amp; change details</div>
             <div class="grid">
               <div class="field"><label for="snapshotScope">Snapshot scope <span class="required">*</span></label><select id="snapshotScope" required><option value="OSOnly">OS disk only</option><option value="AllDisks" selected>OS disk and all data disks</option></select></div>
@@ -116,7 +116,7 @@
               <div class="field full-grid"><label for="snapshotReason">Reason <span class="required">*</span></label><textarea id="snapshotReason" rows="3" maxlength="500" placeholder="Pre-maintenance recovery point" required></textarea></div>
             </div>
             <div id="snapshotValidationMessage" class="validation-message" role="alert"></div>
-            <div class="actions"><div class="secure-note">🔒 Requester identity is captured automatically</div><div class="action-buttons"><button id="snapshotClearButton" type="button" class="secondary">Clear</button><button id="snapshotSubmitButton" type="submit" disabled>Verifying identity…</button></div></div>
+            <div class="actions"><div class="secure-note">👤 Requester user name is attached automatically</div><div class="action-buttons"><button id="snapshotClearButton" type="button" class="secondary">Clear</button><button id="snapshotSubmitButton" type="submit" disabled>Verifying identity…</button></div></div>
           </form>
         </section>
         <aside class="side-stack">
@@ -126,7 +126,7 @@
               <article class="requirement-card"><div class="requirement-number">01</div><div><h3>Managed disks</h3><p>The VM OS disk and selected data disks must be Azure managed disks.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">02</div><div><h3>Snapshot scope</h3><p>Select the OS disk only or the OS disk and all attached data disks.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">03</div><div><h3>VM request limit</h3><p>A single snapshot request can contain a maximum of 5 unique VM hostnames.</p></div></article>
-              <article class="requirement-card"><div class="requirement-number">04</div><div><h3>User request quota</h3><p>Each authenticated user can submit up to 3 snapshot requests in any rolling 24-hour period.</p></div></article>
+              <article class="requirement-card"><div class="requirement-number">04</div><div><h3>User request quota</h3><p>Each entered user name can submit up to 3 snapshot requests in any rolling 24-hour period.</p></div></article>
             </div>
           </section>
           <section class="policy-card"><div class="policy-title">🛡 Recovery-point policy</div><p>Retention and expiry metadata remain unchanged. This redesign affects presentation only.</p></section>
@@ -138,7 +138,7 @@
           <div>
             <span class="requirements-label">Server-side request history</span>
             <h2 id="snapshotHistoryHeading">My Snapshot Requests</h2>
-            <p class="field-help">Only your latest 5 VM Snapshot requests are stored per authenticated Microsoft Entra user. When a 6th request is submitted, the oldest history entry is removed automatically.</p>
+            <p class="field-help">Only your latest 5 VM Snapshot requests are stored per entered user name. When a 6th request is submitted, the oldest history entry is removed automatically.</p>
           </div>
           <button id="snapshotHistoryRefreshButton" type="button" class="secondary">Refresh</button>
         </div>
@@ -150,7 +150,7 @@
     <section id="backupPanel" class="operation-panel" role="tabpanel" aria-labelledby="backupTabButton" hidden>
       <div class="workspace-grid">
         <section class="card request-card">
-          <div class="card-head"><div><h2>New on-demand VM backup request</h2><p>Validate protection state first, then trigger Backup Now for eligible virtual machines.</p></div><span class="request-badge">Authenticated request</span></div>
+          <div class="card-head"><div><h2>New on-demand VM backup request</h2><p>Validate protection state first, then trigger Backup Now for eligible virtual machines.</p></div><span class="request-badge">Tracked request</span></div>
           <div class="information-note" role="note"><strong>Backup Now:</strong> This operation does not enable or change Azure Backup protection. VMs that are not already protected are reported as Not Protected. The result includes the Azure Backup status and the most recent successful recovery point.</div>
           <form id="backupForm" class="form-body" novalidate>
             <div class="section-label">VM scope &amp; pre-check</div>
@@ -167,14 +167,14 @@
             <div class="requirements-grid">
               <article class="requirement-card"><div class="requirement-number">01</div><div><h3>Already protected</h3><p>Only Azure VMs already protected by Azure Backup are eligible for Backup Now.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">02</div><div><h3>VM request limit</h3><p>A single backup request can contain a maximum of 5 unique VM hostnames.</p></div></article>
-              <article class="requirement-card"><div class="requirement-number">03</div><div><h3>User request quota</h3><p>Each authenticated user can submit up to 3 backup requests in any rolling 24-hour period.</p></div></article>
+              <article class="requirement-card"><div class="requirement-number">03</div><div><h3>User request quota</h3><p>Each entered user name can submit up to 3 backup requests in any rolling 24-hour period.</p></div></article>
             </div>
           </section>
           <section class="policy-card"><div class="policy-title">🛡 Protected operation</div><p>The portal performs a protection-state pre-check and keeps the existing server-side request controls.</p></section>
         </aside>
       </div>
       <section id="backupResultArea" class="card result-card" hidden aria-live="polite"></section>
-      <section id="backupHistoryCard" class="card backup-history-card" aria-labelledby="backupHistoryHeading"><div class="backup-history-header"><div><span class="requirements-label">Server-side request history</span><h2 id="backupHistoryHeading">My Backup Requests</h2><p class="field-help">Only your latest 5 VM Backup requests are stored per authenticated Microsoft Entra user. When a 6th request is submitted, the oldest history entry is removed automatically.</p></div><button id="backupHistoryRefreshButton" type="button" class="secondary">Refresh</button></div><div id="backupHistoryMessage" class="field-help" aria-live="polite"></div><div id="backupHistoryTableArea" class="backup-history-table-area"></div></section>
+      <section id="backupHistoryCard" class="card backup-history-card" aria-labelledby="backupHistoryHeading"><div class="backup-history-header"><div><span class="requirements-label">Server-side request history</span><h2 id="backupHistoryHeading">My Backup Requests</h2><p class="field-help">Only your latest 5 VM Backup requests are stored per entered user name. When a 6th request is submitted, the oldest history entry is removed automatically.</p></div><button id="backupHistoryRefreshButton" type="button" class="secondary">Refresh</button></div><div id="backupHistoryMessage" class="field-help" aria-live="polite"></div><div id="backupHistoryTableArea" class="backup-history-table-area"></div></section>
     </section>
 
     <section id="healthPanel" class="operation-panel" role="tabpanel" aria-labelledby="healthTabButton" hidden>
@@ -195,7 +195,7 @@
               <div class="field"><label>Execution mode</label><input type="text" value="Read-only • Single VM" readonly aria-readonly="true"><div class="field-help">No change or incident number is required because this operation makes no VM configuration changes.</div></div>
             </div>
             <div id="healthValidationMessage" class="validation-message" role="alert"></div>
-            <div class="actions"><div class="secure-note">🔒 Requester identity is captured automatically</div><div class="action-buttons"><button id="healthClearButton" type="button" class="secondary">Clear</button><button id="healthSubmitButton" type="submit" disabled>Verifying identity…</button></div></div>
+            <div class="actions"><div class="secure-note">👤 Requester user name is attached automatically</div><div class="action-buttons"><button id="healthClearButton" type="button" class="secondary">Clear</button><button id="healthSubmitButton" type="submit" disabled>Verifying identity…</button></div></div>
           </form>
         </section>
         <aside class="side-stack">
@@ -214,8 +214,8 @@
       <section id="healthResultArea" class="card result-card health-result-card" hidden aria-live="polite"></section>
     </section>
 
-    <footer class="portal-footer"><span>Azure VM Operations Portal</span><span>Enterprise self-service • Secure authenticated access</span></footer>
+    <footer class="portal-footer"><span>Azure VM Operations Portal</span><span>Enterprise self-service • Manual requester identification</span></footer>
   </main>
-  <script src="/app.js?v=20260815-vm-health-v21-regional-law"></script>
+  <script src="/app.js?v=20260815-vm-health-v21-regional-law-no-entra"></script>
 </body>
 </html>

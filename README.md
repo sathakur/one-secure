@@ -1,6 +1,6 @@
 # Azure VM Operations Portal - Single-VM Health Diagnostic Final
 
-This package contains the complete authenticated Azure VM Operations Portal source code.
+This package contains the complete Azure VM Operations Portal source code using a manually entered requester user name instead of Microsoft Entra ID authentication.
 
 Portal modules:
 
@@ -61,3 +61,10 @@ RBAC/deployment:
 - `deployment/VM_Health_Backup_Status_Only_Custom_Role.json`
 - `VM_HEALTH_DIAGNOSTIC_V1_DEPLOYMENT_STEPS.md`
 - `VM_HEALTH_SINGLE_VM_PORTAL_DEPLOYMENT.md`
+
+
+## Requester identification
+
+The portal no longer uses Microsoft Entra ID authentication. The landing page contains one required **User Name** field. The value is stored in browser local storage and sent to the API in the `X-Requester-User-Name` header. Snapshot/backup history and request limits are keyed by that entered user name.
+
+> Security note: this is requester identification, not authentication. A user can type another user name. Use this mode only where that is acceptable.

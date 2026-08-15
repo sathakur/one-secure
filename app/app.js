@@ -5,10 +5,6 @@ const FIXED_TIME_ZONE = "W. Europe Standard Time";
 const IANA_TIME_ZONE = "Europe/Amsterdam";
 const MINIMUM_LEAD_MINUTES = 45;
 const MAXIMUM_DURATION_HOURS = 24;
-const IDLE_TIMEOUT_MINUTES = 60;
-const IDLE_ACTIVITY_THROTTLE_MS = 30000;
-const LAST_ACTIVITY_STORAGE_KEY =
-  "alertSuppressionLastActivityUtc";
 
 const form = document.getElementById("suppressionForm");
 const hostnamesInput = document.getElementById("hostnames");
@@ -131,216 +127,8 @@ let healthStatusPollTimer = null;
 let healthStatusPollCount = 0;
 let currentHealthRequestId = null;
 
-let authenticatedPrincipal = null;
+let manualRequester = null;
 
-
-let idleLogoutTimer = null;
-let idleCheckInterval = null;
-let lastActivityWrittenAt = 0;
-let logoutStarted = false;
-
-function getSignedOutUrl(reason) {
-  const url = new URL("/signed-out.html", window.location.origin);
-  url.searchParams.set("reason", reason);
-  return `${url.pathname}${url.search}`;
-}
-
-function logoutUser(reason = "manual") {
-  if (logoutStarted) return;
-
-  logoutStarted = true;
-  clearTimeout(idleLogoutTimer);
-  clearInterval(idleCheckInterval);
-
-  try {
-    localStorage.removeItem(LAST_ACTIVITY_STORAGE_KEY);
-  } catch {
-    // Continue with logout when browser storage is unavailable.
-  }
-
-  const redirectUrl = encodeURIComponent(
-    getSignedOutUrl(reason)
-  );
-
-  window.location.replace(
-    `/.auth/logout?post_logout_redirect_uri=${redirectUrl}`
-  );
-}
-
-function readStoredLastActivity() {
-  try {
-    const rawValue = localStorage.getItem(
-      LAST_ACTIVITY_STORAGE_KEY
-    );
-
-    if (!rawValue) return null;
-
-    const storedValue = Number(rawValue);
-
-    return Number.isFinite(storedValue) && storedValue > 0
-      ? storedValue
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeLastActivity(timestamp) {
-  try {
-    localStorage.setItem(
-      LAST_ACTIVITY_STORAGE_KEY,
-      String(timestamp)
-    );
-  } catch {
-    // The current-tab timer still works without localStorage.
-  }
-
-  lastActivityWrittenAt = timestamp;
-}
-
-function getIdleMilliseconds() {
-  const lastActivity =
-    readStoredLastActivity() ?? lastActivityWrittenAt;
-
-  if (!lastActivity) return 0;
-
-  return Date.now() - lastActivity;
-}
-
-function hasIdleSessionExpired() {
-  return (
-    getIdleMilliseconds() >=
-    IDLE_TIMEOUT_MINUTES * 60 * 1000
-  );
-}
-
-function checkIdleTimeout() {
-  if (logoutStarted) return true;
-
-  if (hasIdleSessionExpired()) {
-    logoutUser("idle");
-    return true;
-  }
-
-  return false;
-}
-
-function scheduleIdleLogout() {
-  clearTimeout(idleLogoutTimer);
-
-  const lastActivity =
-    readStoredLastActivity() ?? lastActivityWrittenAt;
-
-  if (!lastActivity) return;
-
-  const remainingMilliseconds =
-    IDLE_TIMEOUT_MINUTES * 60 * 1000 -
-    (Date.now() - lastActivity);
-
-  if (remainingMilliseconds <= 0) {
-    logoutUser("idle");
-    return;
-  }
-
-  idleLogoutTimer = window.setTimeout(
-    () => checkIdleTimeout(),
-    remainingMilliseconds
-  );
-}
-
-function recordUserActivity() {
-  if (logoutStarted) return;
-
-  // Do not allow a focus, click, or key press to revive an already
-  // expired session. Check expiry before updating the timestamp.
-  if (checkIdleTimeout()) return;
-
-  const now = Date.now();
-
-  if (
-    now - lastActivityWrittenAt >=
-    IDLE_ACTIVITY_THROTTLE_MS
-  ) {
-    writeLastActivity(now);
-  }
-
-  scheduleIdleLogout();
-}
-
-function startIdleLogoutMonitoring() {
-  const storedLastActivity = readStoredLastActivity();
-
-  if (storedLastActivity) {
-    lastActivityWrittenAt = storedLastActivity;
-
-    if (checkIdleTimeout()) return;
-  } else {
-    writeLastActivity(Date.now());
-  }
-
-  const activityEvents = [
-    "pointerdown",
-    "keydown",
-    "wheel",
-    "scroll",
-    "touchstart"
-  ];
-
-  for (const eventName of activityEvents) {
-    window.addEventListener(
-      eventName,
-      recordUserActivity,
-      { passive: true }
-    );
-  }
-
-  // Focus or returning to a hidden tab must first verify that the
-  // previous session has not already expired. It must not reset the
-  // timer before that check.
-  window.addEventListener("focus", () => {
-    if (!checkIdleTimeout()) {
-      scheduleIdleLogout();
-    }
-  });
-
-  document.addEventListener("visibilitychange", () => {
-    if (
-      document.visibilityState === "visible" &&
-      !checkIdleTimeout()
-    ) {
-      scheduleIdleLogout();
-    }
-  });
-
-  window.addEventListener("pageshow", () => {
-    if (!checkIdleTimeout()) {
-      scheduleIdleLogout();
-    }
-  });
-
-  window.addEventListener("storage", (event) => {
-    if (event.key === LAST_ACTIVITY_STORAGE_KEY) {
-      const updatedActivity = readStoredLastActivity();
-
-      if (updatedActivity) {
-        lastActivityWrittenAt = updatedActivity;
-      }
-
-      if (!checkIdleTimeout()) {
-        scheduleIdleLogout();
-      }
-    }
-  });
-
-  // Browser timers can be delayed while a tab is hidden or a device
-  // sleeps. A wall-clock check makes logout reliable when execution resumes.
-  idleCheckInterval = window.setInterval(
-    () => checkIdleTimeout(),
-    30000
-  );
-
-  scheduleIdleLogout();
-}
 
 
 function activateOperationTab(tabName) {
@@ -528,89 +316,62 @@ function updateHostnameCount() {
   hostnameCount.classList.toggle("over-limit", count > MAX_HOSTNAMES);
 }
 
-function getClaim(principal, claimTypes) {
-  if (!Array.isArray(principal?.claims)) return "";
+const USER_NAME_STORAGE_KEY = "vmOperationsRequesterUserName";
 
-  const accepted = new Set(
-    claimTypes.map((claimType) => claimType.toLowerCase())
-  );
-
-  const claim = principal.claims.find((item) =>
-    accepted.has(String(item?.typ || "").toLowerCase())
-  );
-
-  return String(claim?.val || "").trim();
+function getManualRequesterUserName() {
+  try {
+    return String(localStorage.getItem(USER_NAME_STORAGE_KEY) || "").trim();
+  } catch {
+    return "";
+  }
 }
 
-async function loadAuthenticatedUser() {
-  const response = await fetch("/.auth/me", {
-    method: "GET",
-    headers: {
-      Accept: "application/json"
-    },
-    cache: "no-store"
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `Unable to read authenticated identity (HTTP ${response.status}).`
-    );
+async function portalFetch(input, init = {}) {
+  const userName = getManualRequesterUserName();
+  if (!userName) {
+    window.location.assign("/");
+    throw new Error("Requester user name is required.");
   }
 
-  const payload = await response.json();
-  const principal = payload?.clientPrincipal;
+  const headers = new Headers(init.headers || {});
+  headers.set("X-Requester-User-Name", userName);
+  return window.fetch(input, { ...init, headers });
+}
 
-  if (
-    !principal ||
-    !Array.isArray(principal.userRoles) ||
-    !principal.userRoles.includes("authenticated")
-  ) {
-    window.location.assign(
-      "/.auth/login/aad?post_login_redirect_uri=/portal.html"
-    );
+async function loadManualRequester() {
+  const userName = getManualRequesterUserName();
+  if (!userName) {
+    window.location.assign("/");
     return;
   }
 
-  const nameFromClaim = getClaim(principal, [
-    "name",
-    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"
-  ]);
+  manualRequester = {
+    userDetails: userName,
+    userId: userName.toLowerCase(),
+    identityProvider: "manual"
+  };
 
-  const displayName =
-    nameFromClaim ||
-    String(principal.userDetails || "").trim() ||
-    "Authenticated user";
-
-  authenticatedPrincipal = principal;
-  authenticatedUserName.textContent = displayName;
-  authenticatedProvider.textContent =
-    principal.identityProvider === "aad"
-      ? "Microsoft Entra ID"
-      : String(principal.identityProvider || "Authenticated identity");
-
-  identityStatus.textContent = "Identity verified";
+  authenticatedUserName.textContent = userName;
+  authenticatedProvider.textContent = "Manual user name";
+  identityStatus.textContent = "Ready";
   identityStatus.classList.remove("error");
   identityStatus.classList.add("verified");
 
   submitButton.disabled = false;
   submitButton.textContent = "Submit suppression request";
-
   snapshotSubmitButton.disabled = false;
   snapshotSubmitButton.textContent = "Create VM snapshots";
-
   backupCheckButton.disabled = false;
   backupCheckButton.textContent = "Check Backup Status";
-
   backupSubmitButton.disabled = true;
   backupSubmitButton.textContent = "Check backup status first";
-
   healthSubmitButton.disabled = false;
   healthSubmitButton.textContent = "Run VM health diagnostic";
 }
 
 function validateForm(payload) {
-  if (!authenticatedPrincipal) {
-    return "Your authenticated identity is not available. Refresh the page.";
+  if (!manualRequester) {
+    return "Your requester user name is not available. Return to the start page and enter it again.";
   }
 
   if (payload.hostnames.length < 1) {
@@ -734,8 +495,8 @@ function updateSnapshotHostnameCount() {
 }
 
 function validateSnapshotForm(payload) {
-  if (!authenticatedPrincipal) {
-    return "Your authenticated identity is not available. Refresh the page.";
+  if (!manualRequester) {
+    return "Your requester user name is not available. Return to the start page and enter it again.";
   }
 
   if (payload.hostnames.length < 1) {
@@ -1017,7 +778,7 @@ async function pollSnapshotStatus(requestId) {
   snapshotStatusPollCount += 1;
 
   try {
-    const response = await fetch(
+    const response = await portalFetch(
       `/api/getSnapshotStatus?requestId=${encodeURIComponent(
         requestId
       )}`,
@@ -1031,9 +792,7 @@ async function pollSnapshotStatus(requestId) {
     );
 
     if (response.status === 401) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -1370,7 +1129,7 @@ function renderMySnapshotRequests(
 async function loadMySnapshotRequests(
   showLoading = true
 ) {
-  if (!authenticatedPrincipal) {
+  if (!manualRequester) {
     return;
   }
 
@@ -1384,7 +1143,7 @@ async function loadMySnapshotRequests(
 
   try {
     const response =
-      await fetch(
+      await portalFetch(
         "/api/getMySnapshotRequests?limit=5",
         {
           method: "GET",
@@ -1397,9 +1156,7 @@ async function loadMySnapshotRequests(
       );
 
     if (response.status === 401) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -1445,7 +1202,7 @@ async function openSnapshotRequestFromHistory(
 
   try {
     const response =
-      await fetch(
+      await portalFetch(
         `/api/getSnapshotStatus?requestId=${encodeURIComponent(
           requestId
         )}`,
@@ -1460,9 +1217,7 @@ async function openSnapshotRequestFromHistory(
       );
 
     if (response.status === 401) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -1833,7 +1588,7 @@ async function checkBackupStatusBeforeSubmit() {
 
   try {
     const response =
-      await fetch(
+      await portalFetch(
         "/api/checkBackupStatus",
         {
           method: "POST",
@@ -1869,9 +1624,7 @@ async function checkBackupStatusBeforeSubmit() {
     }
 
     if (response.status === 401) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -1900,18 +1653,18 @@ async function checkBackupStatusBeforeSubmit() {
       </div>`;
   } finally {
     backupCheckButton.disabled =
-      !authenticatedPrincipal;
+      !manualRequester;
 
     backupCheckButton.textContent =
-      authenticatedPrincipal
+      manualRequester
         ? "Check Backup Status"
-        : "Authentication required";
+        : "User name required";
   }
 }
 
 function validateBackupForm(payload) {
-  if (!authenticatedPrincipal) {
-    return "Your authenticated identity is not available. Refresh the page.";
+  if (!manualRequester) {
+    return "Your requester user name is not available. Return to the start page and enter it again.";
   }
 
   if (
@@ -2412,7 +2165,7 @@ function renderMyBackupRequests(
 async function loadMyBackupRequests(
   showLoading = true
 ) {
-  if (!authenticatedPrincipal) {
+  if (!manualRequester) {
     return;
   }
 
@@ -2426,7 +2179,7 @@ async function loadMyBackupRequests(
 
   try {
     const response =
-      await fetch(
+      await portalFetch(
         "/api/getMyBackupRequests?limit=5",
         {
           method: "GET",
@@ -2439,9 +2192,7 @@ async function loadMyBackupRequests(
       );
 
     if (response.status === 401) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -2487,7 +2238,7 @@ async function openBackupRequestFromHistory(
 
   try {
     const response =
-      await fetch(
+      await portalFetch(
         `/api/getBackupStatus?requestId=${encodeURIComponent(
           requestId
         )}`,
@@ -2502,9 +2253,7 @@ async function openBackupRequestFromHistory(
       );
 
     if (response.status === 401) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -2568,7 +2317,7 @@ async function pollBackupStatus(
 
   try {
     const response =
-      await fetch(
+      await portalFetch(
         `/api/getBackupStatus?requestId=${encodeURIComponent(
           requestId
         )}`,
@@ -2585,9 +2334,7 @@ async function pollBackupStatus(
     if (
       response.status === 401
     ) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -2901,7 +2648,7 @@ function updateHealthHostnameCount() {
 }
 
 function validateHealthForm(payload) {
-  if (!authenticatedPrincipal) return "Your authenticated identity is not available. Refresh the page.";
+  if (!manualRequester) return "Your requester user name is not available. Return to the start page and enter it again.";
   if (payload.hostnames.length < 1) return "Enter a VM hostname.";
   if (payload.hostnames.length > HEALTH_MAX_HOSTNAMES) return "VM Health Diagnostic accepts exactly one VM hostname per request.";
 
@@ -3630,7 +3377,7 @@ function stopHealthStatusPolling(clearStoredRequest = false) {
 
 async function pollHealthStatus(requestId) {
   try {
-    const response = await fetch(
+    const response = await portalFetch(
       `/api/getHealthDiagnosticStatus?requestId=${encodeURIComponent(requestId)}`,
       { headers: { Accept: "application/json" }, cache: "no-store" }
     );
@@ -3645,9 +3392,7 @@ async function pollHealthStatus(requestId) {
     }
 
     if (response.status === 401) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html%23health"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -3716,7 +3461,7 @@ healthClearButton.addEventListener("click", () => {
   healthResultArea.innerHTML = "";
   updateHealthHostnameCount();
 
-  if (authenticatedPrincipal) {
+  if (manualRequester) {
     healthSubmitButton.disabled = false;
     healthSubmitButton.textContent = "Run VM health diagnostic";
   }
@@ -3751,7 +3496,7 @@ healthForm.addEventListener("submit", async (event) => {
   `;
 
   try {
-    const response = await fetch("/api/submitHealthDiagnostic", {
+    const response = await portalFetch("/api/submitHealthDiagnostic", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -3774,9 +3519,7 @@ healthForm.addEventListener("submit", async (event) => {
     }
 
     if (response.status === 401) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html%23health"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -3889,7 +3632,7 @@ backupForm.addEventListener("submit", async (event) => {
 
   try {
     const response =
-      await fetch(
+      await portalFetch(
         "/api/submitBackup",
         {
           method: "POST",
@@ -3929,9 +3672,7 @@ backupForm.addEventListener("submit", async (event) => {
     if (
       response.status === 401
     ) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -4028,7 +3769,7 @@ snapshotForm.addEventListener("submit", async (event) => {
     "Submitting snapshot request…";
 
   try {
-    const response = await fetch(
+    const response = await portalFetch(
       "/api/submitSnapshot",
       {
         method: "POST",
@@ -4056,9 +3797,7 @@ snapshotForm.addEventListener("submit", async (event) => {
     }
 
     if (response.status === 401) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -4117,7 +3856,7 @@ form.addEventListener("submit", async (event) => {
   submitButton.textContent = "Processing VMs…";
 
   try {
-    const response = await fetch("/api/submitSuppression", {
+    const response = await portalFetch("/api/submitSuppression", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -4140,9 +3879,7 @@ form.addEventListener("submit", async (event) => {
     }
 
     if (response.status === 401) {
-      window.location.assign(
-        "/.auth/login/aad?post_login_redirect_uri=/portal.html"
-      );
+      window.location.assign("/");
       return;
     }
 
@@ -4162,9 +3899,8 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
-loadAuthenticatedUser()
+loadManualRequester()
   .then(() => {
-    startIdleLogoutMonitoring();
 
     loadMySnapshotRequests(
       false
@@ -4178,34 +3914,34 @@ loadAuthenticatedUser()
   console.error(error);
 
   authenticatedUserName.textContent =
-    "Unable to load authenticated identity";
+    "Unable to load requester user name";
   authenticatedProvider.textContent = error.message;
 
-  identityStatus.textContent = "Identity error";
+  identityStatus.textContent = "User name error";
   identityStatus.classList.remove("verified");
   identityStatus.classList.add("error");
 
   validationMessage.textContent =
-    "Authentication could not be verified. Sign out and sign in again.";
+    "Requester user name is unavailable. Return to the start page and enter it again.";
 
     submitButton.disabled = true;
-    submitButton.textContent = "Authentication required";
+    submitButton.textContent = "User name required";
 
     snapshotSubmitButton.disabled = true;
     snapshotSubmitButton.textContent =
-      "Authentication required";
+      "User name required";
 
     backupCheckButton.disabled = true;
     backupCheckButton.textContent =
-      "Authentication required";
+      "User name required";
 
     backupSubmitButton.disabled = true;
     backupSubmitButton.textContent =
-      "Authentication required";
+      "User name required";
 
     healthSubmitButton.disabled = true;
     healthSubmitButton.textContent =
-      "Authentication required";
+      "User name required";
   });
 
 updateHostnameCount();
