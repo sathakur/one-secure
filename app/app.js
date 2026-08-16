@@ -3050,9 +3050,6 @@ function healthReadResourceHistory(result) {
   return [...items].sort((a,b) => new Date(b?.properties?.reportedTime || b?.properties?.occuredTime || 0) - new Date(a?.properties?.reportedTime || a?.properties?.occuredTime || 0)).slice(0, 15);
 }
 
-function healthReadEffectiveRoutes(result) {
-  return Array.isArray(result?.effectiveRoutes?.value) ? result.effectiveRoutes.value : [];
-}
 
 function healthReadEffectiveNSGs(result) {
   return Array.isArray(result?.effectiveNSGs?.value) ? result.effectiveNSGs.value : [];
@@ -3087,7 +3084,7 @@ function deriveVmHealth(result) {
       recommendations: ["Review the Logic App run history and the failed data source before retrying the diagnostic."],
       powerState: "Unknown", provisioningState: "Unknown", agentStatus: "Unknown", resourceHealth: "Unknown",
       platform: healthReadPlatform({}), guest: healthReadGuest({}), patch: healthReadPatch({}), monitoring: healthReadMonitoring({}, healthReadGuest({})),
-      backup: healthReadBackup({}), alerts: [], activity: [], resourceHistory: [], effectiveRoutes: [], effectiveNSGs: [], freshness: { rows: [], state: "Unknown" }
+      backup: healthReadBackup({}), alerts: [], activity: [], resourceHistory: [], effectiveNSGs: [], freshness: { rows: [], state: "Unknown" }
     };
   }
 
@@ -3104,7 +3101,6 @@ function deriveVmHealth(result) {
   const alerts = healthReadAlerts(result);
   const activity = healthReadActivity(result);
   const resourceHistory = healthReadResourceHistory(result);
-  const effectiveRoutes = healthReadEffectiveRoutes(result);
   const effectiveNSGs = healthReadEffectiveNSGs(result);
   const extensions = healthReadExtensions(result);
   const running = healthIsRunning(powerState);
@@ -3184,7 +3180,7 @@ function deriveVmHealth(result) {
   if (recommendations.length === 0) recommendations.push("No immediate remediation recommendation was generated from the configured read-only checks.");
 
   const freshness = healthDataFreshness(result, platform, guest, patch, backup, monitoring);
-  return { overall, findings, recommendations, powerState, provisioningState, agentStatus, resourceHealth, platform, guest, patch, monitoring, backup, alerts, activity, resourceHistory, effectiveRoutes, effectiveNSGs, freshness };
+  return { overall, findings, recommendations, powerState, provisioningState, agentStatus, resourceHealth, platform, guest, patch, monitoring, backup, alerts, activity, resourceHistory, effectiveNSGs, freshness };
 }
 
 function healthBadgeClass(status) {
@@ -3209,10 +3205,17 @@ function healthBuildMiniTable(headers, rows) {
 
 function healthBuildConfiguration(result, view) {
   const vm = result?.vm || {};
+  const hardware = result?.hardware || {};
+  const vCpuCount = healthFiniteNumber(hardware.vCpuCount);
+  const memoryMb = healthFiniteNumber(hardware.memoryMB);
+  const memoryGb = memoryMb === null ? null : memoryMb / 1024;
   const rows = [
     ["Azure VM name", vm.VMName || "Unknown"], ["OS hostname", vm.ComputerName || vm.Hostname || result?.hostname || "Unknown"],
     ["Subscription", vm.SubscriptionName || vm.SubscriptionId || "Unknown"], ["Resource group", vm.ResourceGroup || "Unknown"],
-    ["Region", vm.Location || "Unknown"], ["VM size", vm.VMSize || "Unknown"], ["OS type", vm.OSType || "Unknown"],
+    ["Region", vm.Location || "Unknown"], ["VM size", vm.VMSize || "Unknown"],
+    ["vCPUs", vCpuCount === null ? "Unknown" : healthFormatNumber(vCpuCount, 0)],
+    ["RAM", memoryGb === null ? "Unknown" : `${healthFormatNumber(memoryGb, memoryGb % 1 === 0 ? 0 : 1)} GB`],
+    ["OS type", vm.OSType || "Unknown"],
     ["Security type", vm.SecurityType || "Standard / not reported"], ["Managed identity", vm.IdentityType || "None / not reported"],
     ["Boot diagnostics", vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown"],
     ["Power state", view.powerState], ["Provisioning state", view.provisioningState], ["VM Agent", view.agentStatus], ["Resource ID", vm.ResourceId || "Unknown"]
@@ -3228,10 +3231,16 @@ function healthVmPortalUrl(result) {
 function healthCopyText(result) {
   const v = deriveVmHealth(result);
   const vm = result?.vm || {};
+  const hardware = result?.hardware || {};
+  const vCpuCount = healthFiniteNumber(hardware.vCpuCount);
+  const memoryMb = healthFiniteNumber(hardware.memoryMB);
+  const memoryGb = memoryMb === null ? null : memoryMb / 1024;
   return [
-    `VM Health Diagnostic V2.6`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
+    `VM Health Diagnostic V2.6.2`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
     `Power: ${v.powerState}`, `Resource Health: ${v.resourceHealth}`, `Active alerts: ${v.alerts.length}`,
     `CPU avg/max: ${healthIsRunning(v.powerState) ? `${healthFormatPercent(v.platform.cpu.average)} / ${healthFormatPercent(v.platform.cpu.maximum)}` : "N/A - VM not running"}`,
+    `vCPUs: ${vCpuCount === null ? "Unknown" : healthFormatNumber(vCpuCount, 0)}`,
+    `RAM: ${memoryGb === null ? "Unknown" : `${healthFormatNumber(memoryGb, memoryGb % 1 === 0 ? 0 : 1)} GB`}`,
     `Memory available: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A - VM not running"}`,
     `Lowest disk free: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.lowestDiskFreePercent) : "N/A - VM not running"}`,
     `Backup: ${v.backup.protected}; last=${v.backup.lastBackupStatus}; ${healthAgeText(v.backup.lastBackupTime)}`,
@@ -3552,7 +3561,7 @@ function healthDownloadPdfReport(result) {
       </div>
       <div class="health-pdf-meta">
         <div><strong>Generated:</strong> ${escapeHtml(generatedDisplay)}</div>
-        <div><strong>Portal:</strong> VM Health Diagnostic V2.6</div>
+        <div><strong>Portal:</strong> VM Health Diagnostic V2.6.2</div>
       </div>
     </header>
 
@@ -3594,6 +3603,14 @@ function healthDiskFreeStatus(percent) {
 function healthBuildVmCard(result, index) {
   const view = deriveVmHealth(result);
   const vm = result?.vm || {};
+  const hardware = result?.hardware || {};
+  const vCpuCount = healthFiniteNumber(hardware.vCpuCount);
+  const memoryMb = healthFiniteNumber(hardware.memoryMB);
+  const memoryGb = memoryMb === null ? null : memoryMb / 1024;
+  const computeSummary = [
+    vCpuCount === null ? null : `${healthFormatNumber(vCpuCount, 0)} vCPU`,
+    memoryGb === null ? null : `${healthFormatNumber(memoryGb, memoryGb % 1 === 0 ? 0 : 1)} GB RAM`
+  ].filter(Boolean).join(" • ");
   const guest = view.guest;
   const patch = view.patch;
   const monitoring = view.monitoring;
@@ -3663,11 +3680,6 @@ function healthBuildVmCard(result, index) {
     { label: "IP forwarding", value: (r) => r.IPForwarding === true ? "Enabled" : r.IPForwarding === false ? "Disabled" : "Unknown" }
   ], nics);
 
-  const routesTable = healthBuildMiniTable([
-    { label: "Prefix", value: (r) => Array.isArray(r.addressPrefix) ? r.addressPrefix.join(", ") : (r.addressPrefix || "Unknown") },
-    { label: "Next hop", value: (r) => r.nextHopType || "Unknown" }, { label: "Next-hop IP", value: (r) => Array.isArray(r.nextHopIpAddress) ? r.nextHopIpAddress.join(", ") : (r.nextHopIpAddress || "-") },
-    { label: "Source", value: (r) => r.source || "Unknown" }, { label: "State", value: (r) => r.state || "Unknown" }
-  ], view.effectiveRoutes);
 
   const nsgRows = view.effectiveNSGs.flatMap((item) => {
     const nsgName = healthBasename(item?.networkSecurityGroup?.id || item?.networkSecurityGroup?.Id || item?.networkSecurityGroup?.name);
@@ -3752,7 +3764,7 @@ function healthBuildVmCard(result, index) {
         <div class="health-chip"><span class="health-chip-label">Power</span><span class="health-chip-value">${escapeHtml(view.powerState)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Resource Health</span><span class="health-chip-value">${escapeHtml(view.resourceHealth)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Active alerts</span><span class="health-chip-value">${escapeHtml(view.alerts.length)}</span></div>
-        <div class="health-chip"><span class="health-chip-label">CPU avg / max</span><span class="health-chip-value">${escapeHtml(runtimeMetric(view.platform.cpu.average))} / ${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</span></div>
+        <div class="health-chip"><span class="health-chip-label">CPU avg / max</span><span class="health-chip-value">${escapeHtml(runtimeMetric(view.platform.cpu.average))} / ${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</span>${computeSummary ? `<span class="health-kpi-note">${escapeHtml(computeSummary)}</span>` : ""}</div>
         <div class="health-chip"><span class="health-chip-label">Memory available</span><span class="health-chip-value">${escapeHtml(memoryDisplay)}</span></div>
         <div class="health-chip health-disk-kpi">
           <span class="health-chip-label">${escapeHtml(diskCardLabel)}</span>
@@ -3792,7 +3804,7 @@ function healthBuildVmCard(result, index) {
         <details><summary>VM configuration &amp; runtime</summary><div class="health-details-body">${healthBuildConfiguration(result, view)}</div></details>
         <details><summary>Performance</summary><div class="health-details-body"><div class="health-metric-grid"><div class="health-metric-box"><span>CPU average</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.average))}</strong></div><div class="health-metric-box"><span>CPU maximum</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</strong></div><div class="health-metric-box"><span>Metric latest</span><strong>${escapeHtml(healthFormatDateTime(view.platform.cpu.latestUtc))}</strong></div><div class="health-metric-box"><span>Network in</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Network out</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Period</span><strong>${escapeHtml(`${result?.periodMinutes || ""} min`)}</strong></div></div>${freshnessTable}</div></details>
         <details><summary>Storage &amp; disk performance</summary><div class="health-details-body"><h4 class="health-section-heading">Azure managed disks</h4>${managedDiskTable}<h4 class="health-section-heading">Guest logical disks</h4>${guestDiskTable}<h4 class="health-section-heading">Platform disk performance</h4>${diskPerfTable}</div></details>
-        <details><summary>Network &amp; effective configuration</summary><div class="health-details-body"><h4 class="health-section-heading">NIC configuration</h4>${networkTable}<h4 class="health-section-heading">Effective routes</h4>${routesTable}<h4 class="health-section-heading">Effective network security groups</h4>${nsgTable}</div></details>
+        <details><summary>Network &amp; security configuration</summary><div class="health-details-body"><h4 class="health-section-heading">NIC configuration</h4>${networkTable}<h4 class="health-section-heading">Effective network security groups</h4>${nsgTable}</div></details>
         <details><summary>Azure alerts &amp; recent changes</summary><div class="health-details-body"><h4 class="health-section-heading">Active fired alerts</h4>${alertTable}<h4 class="health-section-heading">Azure Activity Log - last 24 hours</h4>${activityTable}</div></details>
         <details><summary>Resource Health history</summary><div class="health-details-body"><p class="field-help">Current summary: <strong>${escapeHtml(rh.summary || rh.title || view.resourceHealth)}</strong> • Context: <strong>${escapeHtml(rh.context || "Unknown")}</strong> • Reason: <strong>${escapeHtml(rh.reasonType || rh.category || "Unknown")}</strong> • Reported: <strong>${escapeHtml(healthFormatDateTime(rh.reportedTime))}</strong>${rh.resolutionETA ? ` • Resolution ETA: <strong>${escapeHtml(healthFormatDateTime(rh.resolutionETA))}</strong>` : ""}</p><h4 class="health-section-heading">Azure recommended actions</h4>${rhRecommendedHtml}<h4 class="health-section-heading">Availability history</h4>${resourceHistoryTable}</div></details>
         <details><summary>VM extensions</summary><div class="health-details-body">${extensionTable}</div></details>
@@ -3843,6 +3855,8 @@ function renderHealthStatus(result) {
         const rows = [
           ["VM", item.hostname || item?.vm?.VMName || ""], ["Overall", v.overall], ["Power", v.powerState], ["Resource Health", v.resourceHealth], ["Active alerts", v.alerts.length],
           ["CPU average", healthIsRunning(v.powerState) ? healthFormatPercent(v.platform.cpu.average) : "N/A"], ["CPU maximum", healthIsRunning(v.powerState) ? healthFormatPercent(v.platform.cpu.maximum) : "N/A"],
+          ["vCPUs", healthFiniteNumber(item?.hardware?.vCpuCount) === null ? "Unknown" : healthFormatNumber(item.hardware.vCpuCount, 0)],
+          ["RAM GB", healthFiniteNumber(item?.hardware?.memoryMB) === null ? "Unknown" : healthFormatNumber(item.hardware.memoryMB / 1024, 1)],
           ["Memory available", healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A"], ["Lowest disk free", healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.lowestDiskFreePercent) : "N/A"],
           ["Backup protection", v.backup.protected], ["Last backup status", v.backup.lastBackupStatus], ["Last backup", v.backup.lastBackupTime || "Unknown"], ["Patch pending", v.patch.available ? v.patch.totalPending : "Unknown"], ["Regional LAW", v.monitoring.regionalLawName], ["Heartbeat", v.monitoring.heartbeatState]
         ];
