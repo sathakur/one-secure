@@ -1,0 +1,25 @@
+{
+  "properties": {
+    "roleName": "VM Health LAW Query Reader",
+    "description": "Read-only access for the VM Health Logic App to resolve and query Log Analytics workspace data. No workspace configuration changes are allowed.",
+    "assignableScopes": [
+      "/subscriptions/<LAW-SUBSCRIPTION-ID>"
+    ],
+    "permissions": [
+      {
+        "actions": [
+          "Microsoft.OperationalInsights/workspaces/read",
+          "Microsoft.OperationalInsights/workspaces/query/read"
+        ],
+        "notActions": [
+          "Microsoft.OperationalInsights/workspaces/write",
+          "Microsoft.OperationalInsights/workspaces/delete",
+          "Microsoft.Authorization/roleAssignments/write",
+          "Microsoft.Authorization/roleDefinitions/write"
+        ],
+        "dataActions": [],
+        "notDataActions": []
+      }
+    ]
+  }
+}

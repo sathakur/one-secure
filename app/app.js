@@ -3229,7 +3229,7 @@ function healthCopyText(result) {
   const v = deriveVmHealth(result);
   const vm = result?.vm || {};
   return [
-    `VM Health Diagnostic V2.5`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
+    `VM Health Diagnostic V2.6`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
     `Power: ${v.powerState}`, `Resource Health: ${v.resourceHealth}`, `Active alerts: ${v.alerts.length}`,
     `CPU avg/max: ${healthIsRunning(v.powerState) ? `${healthFormatPercent(v.platform.cpu.average)} / ${healthFormatPercent(v.platform.cpu.maximum)}` : "N/A - VM not running"}`,
     `Memory available: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A - VM not running"}`,
@@ -3244,6 +3244,14 @@ function healthDownloadFile(filename, content, type) {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a"); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+
+function healthDiskFreeStatus(percent) {
+  const value = healthFiniteNumber(percent);
+  if (value === null) return "unknown";
+  if (value < 10) return "critical";
+  if (value < 25) return "warning";
+  return "healthy";
 }
 
 function healthBuildVmCard(result, index) {
@@ -3263,20 +3271,38 @@ function healthBuildVmCard(result, index) {
   const memoryDisplay = !running ? "N/A – VM not running" : guest.availableMemoryPercent !== null ? healthFormatPercent(guest.availableMemoryPercent) : guest.availableMemoryMb !== null ? `${healthFormatNumber(guest.availableMemoryMb, 0)} MB` : "Unknown";
   const diskDisplay = !running ? "N/A – VM not running" : guest.lowestDiskFreePercent !== null ? healthFormatPercent(guest.lowestDiskFreePercent) : guest.lowestDiskFreeMb !== null ? `${healthFormatNumber(guest.lowestDiskFreeMb, 0)} MB` : "Unknown";
 
-  const diskSummaryList = guest.individualDisks.length
-    ? guest.individualDisks.map((disk) => {
-        const freeValue = disk.freePercent !== null
-          ? `${disk.freePercent.toFixed(1)}%`
-          : disk.freeMb !== null
-            ? `${healthFormatNumber(disk.freeMb / 1024, 1)} GB`
-            : "Unknown";
-        return `${disk.instance}: ${freeValue}`;
-      }).join(" • ")
-    : guest.totalDisk
-      ? `Overall (_Total): ${guest.totalDisk.freePercent !== null ? `${guest.totalDisk.freePercent.toFixed(1)}%` : guest.totalDisk.freeMb !== null ? `${healthFormatNumber(guest.totalDisk.freeMb / 1024, 1)} GB` : "Unknown"}`
-      : "No logical-disk data";
+  const driveLetterDisks = guest.individualDisks.filter((disk) => /^[A-Za-z]:$/.test(String(disk.instance || "").trim()));
+  const systemVolumeDisks = guest.individualDisks.filter((disk) => !/^[A-Za-z]:$/.test(String(disk.instance || "").trim()));
 
-  const diskCardLabel = guest.perDriveDataAvailable ? "Disk free by drive" : "Disk free";
+  const lowestDrive = driveLetterDisks
+    .filter((disk) => disk.freePercent !== null)
+    .sort((a, b) => a.freePercent - b.freePercent)[0] || null;
+
+  const diskCardLabel = driveLetterDisks.length ? "Disk space" : "Disk free";
+  const diskHeadline = lowestDrive
+    ? `${lowestDrive.freePercent.toFixed(1)}%`
+    : diskDisplay;
+
+  const diskHeadlineNote = lowestDrive
+    ? `Lowest free drive: ${lowestDrive.instance}`
+    : guest.totalDisk
+      ? "Overall logical disks"
+      : "No drive-level telemetry";
+
+  const diskDrivePillsHtml = driveLetterDisks.length
+    ? `<div class="health-disk-pills">${driveLetterDisks.map((disk) => {
+        const percent = disk.freePercent;
+        const freeGb = disk.freeMb !== null ? healthFormatNumber(disk.freeMb / 1024, 1) : null;
+        const status = healthDiskFreeStatus(percent);
+        const valueText = percent !== null ? `${percent.toFixed(1)}%` : freeGb !== null ? `${freeGb} GB` : "Unknown";
+        const titleText = freeGb !== null ? `${disk.instance} - ${valueText} free (${freeGb} GB)` : `${disk.instance} - ${valueText} free`;
+        return `<span class="health-disk-pill health-disk-${status}" title="${escapeHtml(titleText)}"><strong>${escapeHtml(disk.instance)}</strong><span>${escapeHtml(valueText)}</span></span>`;
+      }).join("")}</div>`
+    : "";
+
+  const diskSystemNoteHtml = systemVolumeDisks.length
+    ? `<span class="health-disk-system-note">${escapeHtml(`${systemVolumeDisks.length} system volume${systemVolumeDisks.length === 1 ? "" : "s"} available in details`)}</span>`
+    : "";
 
   const findingsHtml = view.findings.length ? `<ul>${view.findings.map((finding) => `<li class="health-finding-${finding.severity.toLowerCase()}"><strong>${escapeHtml(finding.severity)}:</strong> ${escapeHtml(finding.message)}</li>`).join("")}</ul>` : '<div class="health-empty">No warning or critical findings were identified by the configured V2 rules.</div>';
 
@@ -3391,7 +3417,15 @@ function healthBuildVmCard(result, index) {
         <div class="health-chip"><span class="health-chip-label">Active alerts</span><span class="health-chip-value">${escapeHtml(view.alerts.length)}</span></div>
         <div class="health-chip"><span class="health-chip-label">CPU avg / max</span><span class="health-chip-value">${escapeHtml(runtimeMetric(view.platform.cpu.average))} / ${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</span></div>
         <div class="health-chip"><span class="health-chip-label">Memory available</span><span class="health-chip-value">${escapeHtml(memoryDisplay)}</span></div>
-        <div class="health-chip"><span class="health-chip-label">${escapeHtml(diskCardLabel)}</span><span class="health-chip-value">${escapeHtml(diskDisplay)}</span><span class="health-kpi-note">${escapeHtml(diskSummaryList)}</span></div>
+        <div class="health-chip health-disk-kpi">
+          <span class="health-chip-label">${escapeHtml(diskCardLabel)}</span>
+          <div class="health-disk-headline">
+            <span class="health-chip-value">${escapeHtml(diskHeadline)}</span>
+            <span class="health-disk-lowest">${escapeHtml(diskHeadlineNote)}</span>
+          </div>
+          ${diskDrivePillsHtml}
+          ${diskSystemNoteHtml}
+        </div>
         <div class="health-chip"><span class="health-chip-label">Network in / out</span><span class="health-chip-value">${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")} / ${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</span></div>
         <div class="health-chip"><span class="health-chip-label">Azure Backup</span><span class="health-chip-value">${escapeHtml(backup.protected)}</span><span class="health-kpi-note">${escapeHtml(backup.lastBackupStatus)} • ${escapeHtml(healthAgeText(backup.lastBackupTime))}</span></div>
         <div class="health-chip"><span class="health-chip-label">Patch assessment</span><span class="health-chip-value">${escapeHtml(patchDisplay)}</span><span class="health-kpi-note">${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}</span></div>
