@@ -2831,6 +2831,26 @@ function healthReadLawPerformance(result) {
   return healthRowsFromLawQuery(result?.lawPerformance);
 }
 
+function healthReadWindowsEvents(result) {
+  return healthRowsFromLawQuery(result?.windowsEvents).map((row) => ({
+    timeGenerated: row.TimeGenerated || null,
+    computer: String(row.Computer || ""),
+    eventLog: String(row.EventLog || "Unknown"),
+    level: String(row.EventLevelName || "Unknown"),
+    eventLevel: healthFiniteNumber(row.EventLevel),
+    eventId: row.EventID ?? "Unknown",
+    source: String(row.Source || "Unknown"),
+    message: String(row.Message || ""),
+    resourceId: String(row.ResourceId || "")
+  }));
+}
+
+function healthShortText(value, maxLength = 300) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+}
+
 function healthReadRegionalLaw(result) {
   const regional = result?.regionalLaw || {};
   const workspace = regional?.workspace || {};
@@ -2970,6 +2990,10 @@ function healthReadLawQueryDiagnostics(result) {
     performanceHttpStatus: number(d.performanceHttpStatus),
     performanceErrorCode: clean(d.performanceErrorCode),
     performanceErrorMessage: clean(d.performanceErrorMessage),
+    windowsEventStatus: clean(d.windowsEventStatus || "Unknown"),
+    windowsEventHttpStatus: number(d.windowsEventHttpStatus),
+    windowsEventErrorCode: clean(d.windowsEventErrorCode),
+    windowsEventErrorMessage: clean(d.windowsEventErrorMessage),
     fallbackUsed: d.fallbackUsed === true,
     primaryWorkspaceName: clean(d.primaryWorkspaceName),
     fallbackWorkspaceName: clean(d.fallbackWorkspaceName),
@@ -2978,7 +3002,9 @@ function healthReadLawQueryDiagnostics(result) {
     primaryGuestStatus: clean(d.primaryGuestStatus || "Unknown"),
     primaryGuestHttpStatus: number(d.primaryGuestHttpStatus),
     primaryPerformanceStatus: clean(d.primaryPerformanceStatus || "Unknown"),
-    primaryPerformanceHttpStatus: number(d.primaryPerformanceHttpStatus)
+    primaryPerformanceHttpStatus: number(d.primaryPerformanceHttpStatus),
+    primaryWindowsEventStatus: clean(d.primaryWindowsEventStatus || "Unknown"),
+    primaryWindowsEventHttpStatus: number(d.primaryWindowsEventHttpStatus)
   };
 }
 
@@ -3084,7 +3110,7 @@ function deriveVmHealth(result) {
       recommendations: ["Review the Logic App run history and the failed data source before retrying the diagnostic."],
       powerState: "Unknown", provisioningState: "Unknown", agentStatus: "Unknown", resourceHealth: "Unknown",
       platform: healthReadPlatform({}), guest: healthReadGuest({}), patch: healthReadPatch({}), monitoring: healthReadMonitoring({}, healthReadGuest({})),
-      backup: healthReadBackup({}), alerts: [], activity: [], resourceHistory: [], effectiveNSGs: [], freshness: { rows: [], state: "Unknown" }
+      backup: healthReadBackup({}), alerts: [], activity: [], resourceHistory: [], effectiveNSGs: [], windowsEvents: [], windowsEventSummary: { critical24h: 0, error24h: 0, recentCritical: 0, lastCriticalUtc: null }, freshness: { rows: [], state: "Unknown" }
     };
   }
 
@@ -3102,8 +3128,27 @@ function deriveVmHealth(result) {
   const activity = healthReadActivity(result);
   const resourceHistory = healthReadResourceHistory(result);
   const effectiveNSGs = healthReadEffectiveNSGs(result);
+  const windowsEvents = healthReadWindowsEvents(result);
   const extensions = healthReadExtensions(result);
   const running = healthIsRunning(powerState);
+
+  const diagnosticPeriodMinutes = Number(result?.periodMinutes || 60);
+  const criticalWindowsEvents = windowsEvents.filter((event) => /^critical$/i.test(event.level));
+  const errorWindowsEvents = windowsEvents.filter((event) => /^error$/i.test(event.level));
+  const recentCriticalWindowsEvents = criticalWindowsEvents.filter((event) => {
+    const age = healthAgeMinutes(event.timeGenerated);
+    return age !== null && age <= diagnosticPeriodMinutes;
+  });
+  const lastCriticalWindowsEvent = [...criticalWindowsEvents]
+    .filter((event) => event.timeGenerated)
+    .sort((a, b) => new Date(b.timeGenerated) - new Date(a.timeGenerated))[0] || null;
+
+  const windowsEventSummary = {
+    critical24h: criticalWindowsEvents.length,
+    error24h: errorWindowsEvents.length,
+    recentCritical: recentCriticalWindowsEvents.length,
+    lastCriticalUtc: lastCriticalWindowsEvent?.timeGenerated || null
+  };
 
   if (powerState !== "Unknown" && !running) healthAddFinding(findings, "Critical", "VM_NOT_RUNNING", `VM power state is ${powerState}.`);
   if (provisioningState !== "Unknown" && !/succeeded/i.test(provisioningState)) healthAddFinding(findings, "Critical", "PROVISIONING_STATE", `VM provisioning state is ${provisioningState}.`);
@@ -3133,6 +3178,12 @@ function deriveVmHealth(result) {
   const highAlerts = alerts.filter((a) => /Sev0|Sev1/i.test(String(a?.properties?.essentials?.severity || "")));
   if (highAlerts.length) healthAddFinding(findings, "Critical", "ACTIVE_ALERT", `${highAlerts.length} active Sev0/Sev1 Azure Monitor alert(s) target this VM.`);
   else if (alerts.length) healthAddFinding(findings, "Warning", "ACTIVE_ALERT", `${alerts.length} active Azure Monitor alert(s) target this VM.`);
+
+  if (windowsEventSummary.recentCritical > 0) {
+    healthAddFinding(findings, "Critical", "WINDOWS_CRITICAL_EVENT", `${windowsEventSummary.recentCritical} Critical Windows Event Viewer event(s) occurred during the selected ${diagnosticPeriodMinutes}-minute diagnostic period.`);
+  } else if (windowsEventSummary.critical24h > 0) {
+    healthAddFinding(findings, "Warning", "WINDOWS_CRITICAL_EVENT_HISTORY", `${windowsEventSummary.critical24h} Critical Windows Event Viewer event(s) occurred in the last 24 hours.`);
+  }
 
   if (backup.protected.toLowerCase() !== "protected") healthAddFinding(findings, "Warning", "BACKUP_PROTECTION", `Azure Backup protection status is ${backup.protected}.`);
   if (/unhealthy|failed/i.test(backup.lastBackupStatus)) healthAddFinding(findings, "Warning", "BACKUP_LAST_STATUS", `Last Azure Backup status is ${backup.lastBackupStatus}.`);
@@ -3175,12 +3226,13 @@ function deriveVmHealth(result) {
   if (monitoring.regionalLawFallbackUsed) recommendations.push(`Primary LAW ${monitoring.regionalLawPrimaryName || "central-law-weu-law"} had no matching VM telemetry, so ${monitoring.regionalLawName} was queried as the last-resort fallback. Confirm whether this VM is expected to report to the fallback LAW.`);
   if (!monitoring.vmInsightsDataAvailable) recommendations.push(`Validate VM Insights / InsightsMetrics collection in effective LAW ${monitoring.regionalLawName} before relying on guest memory/disk health.`);
   if (monitoring.heartbeatAgeMinutes !== null && monitoring.heartbeatAgeMinutes > 30) recommendations.push("Investigate the stale VM Insights heartbeat: check AMA extension state, DCR association, outbound connectivity and workspace ingestion.");
+  if (windowsEventSummary.critical24h > 0) recommendations.push("Review recent Critical Windows System/Application events, starting with the newest Event ID and source.");
   if (patch.criticalSecurityCount > 0) recommendations.push("Review pending Critical/Security patches in Azure Update Manager and schedule remediation through the approved patch process.");
   if (backup.protected.toLowerCase() !== "protected" || /unhealthy|failed/i.test(backup.lastBackupStatus)) recommendations.push("Review Azure Backup protection and the latest backup job before relying on recovery-point availability.");
   if (recommendations.length === 0) recommendations.push("No immediate remediation recommendation was generated from the configured read-only checks.");
 
   const freshness = healthDataFreshness(result, platform, guest, patch, backup, monitoring);
-  return { overall, findings, recommendations, powerState, provisioningState, agentStatus, resourceHealth, platform, guest, patch, monitoring, backup, alerts, activity, resourceHistory, effectiveNSGs, freshness };
+  return { overall, findings, recommendations, powerState, provisioningState, agentStatus, resourceHealth, platform, guest, patch, monitoring, backup, alerts, activity, resourceHistory, effectiveNSGs, windowsEvents, windowsEventSummary, freshness };
 }
 
 function healthBadgeClass(status) {
@@ -3236,7 +3288,7 @@ function healthCopyText(result) {
   const memoryMb = healthFiniteNumber(hardware.memoryMB);
   const memoryGb = memoryMb === null ? null : memoryMb / 1024;
   return [
-    `VM Health Diagnostic V2.6.2`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
+    `VM Health Diagnostic V2.6.3`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
     `Power: ${v.powerState}`, `Resource Health: ${v.resourceHealth}`, `Active alerts: ${v.alerts.length}`,
     `CPU avg/max: ${healthIsRunning(v.powerState) ? `${healthFormatPercent(v.platform.cpu.average)} / ${healthFormatPercent(v.platform.cpu.maximum)}` : "N/A - VM not running"}`,
     `vCPUs: ${vCpuCount === null ? "Unknown" : healthFormatNumber(vCpuCount, 0)}`,
@@ -3244,7 +3296,9 @@ function healthCopyText(result) {
     `Memory available: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A - VM not running"}`,
     `Lowest disk free: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.lowestDiskFreePercent) : "N/A - VM not running"}`,
     `Backup: ${v.backup.protected}; last=${v.backup.lastBackupStatus}; ${healthAgeText(v.backup.lastBackupTime)}`,
-    `Patch pending: ${v.patch.available ? v.patch.totalPending : "Unknown"}`, `Regional LAW: ${v.monitoring.regionalLawName}`, `Monitoring: ${v.monitoring.heartbeatState}`,
+    `Patch pending: ${v.patch.available ? v.patch.totalPending : "Unknown"}`,
+    `Windows events (24h): ${v.windowsEventSummary.critical24h} Critical / ${v.windowsEventSummary.error24h} Error`,
+    `Regional LAW: ${v.monitoring.regionalLawName}`, `Monitoring: ${v.monitoring.heartbeatState}`,
     `Findings:`, ...v.findings.map((f) => `- ${f.severity}: ${f.message}`), `Recommendations:`, ...v.recommendations.map((r) => `- ${r}`)
   ].join("\n");
 }
@@ -3561,7 +3615,7 @@ function healthDownloadPdfReport(result) {
       </div>
       <div class="health-pdf-meta">
         <div><strong>Generated:</strong> ${escapeHtml(generatedDisplay)}</div>
-        <div><strong>Portal:</strong> VM Health Diagnostic V2.6.2</div>
+        <div><strong>Portal:</strong> VM Health Diagnostic V2.6.3</div>
       </div>
     </header>
 
@@ -3615,6 +3669,8 @@ function healthBuildVmCard(result, index) {
   const patch = view.patch;
   const monitoring = view.monitoring;
   const backup = view.backup;
+  const windowsEvents = view.windowsEvents;
+  const windowsEventSummary = view.windowsEventSummary;
   const disks = Array.isArray(result?.managedDisks?.data) ? result.managedDisks.data : [];
   const nics = Array.isArray(result?.network?.data) ? result.network.data : [];
   const extensions = healthReadExtensions(result);
@@ -3729,6 +3785,15 @@ function healthBuildVmCard(result, index) {
     { label: "Context", value: (r) => r?.properties?.context || "Unknown" }, { label: "Reason", value: (r) => r?.properties?.reasonType || r?.properties?.category || "Unknown" },
     { label: "Summary", value: (r) => r?.properties?.summary || r?.properties?.title || "" }
   ], view.resourceHistory);
+  const windowsEventTable = healthBuildMiniTable([
+    { label: "Time", value: (r) => healthFormatDateTime(r.timeGenerated) },
+    { label: "Level", value: (r) => r.level },
+    { label: "Log", value: (r) => r.eventLog },
+    { label: "Event ID", value: (r) => r.eventId },
+    { label: "Source", value: (r) => r.source },
+    { label: "Message", value: (r) => healthShortText(r.message, 320) }
+  ], windowsEvents);
+
   const rh = result?.resourceHealth?.properties || {};
   const rhRecommended = Array.isArray(rh.recommendedActions) ? rh.recommendedActions : [];
   const rhRecommendedHtml = rhRecommended.length
@@ -3780,6 +3845,7 @@ function healthBuildVmCard(result, index) {
         <div class="health-chip"><span class="health-chip-label">Patch assessment</span><span class="health-chip-value">${escapeHtml(patchDisplay)}</span><span class="health-kpi-note">${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}</span></div>
         <div class="health-chip"><span class="health-chip-label">Monitoring</span><span class="health-chip-value">${escapeHtml(monitorDisplay)}</span><span class="health-kpi-note">${escapeHtml(monitoring.regionalLawName)} • Heartbeat: ${escapeHtml(monitoring.heartbeatState)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Data freshness</span><span class="health-chip-value">${escapeHtml(view.freshness.state)}</span></div>
+        <div class="health-chip"><span class="health-chip-label">Windows events</span><span class="health-chip-value">${escapeHtml(`${windowsEventSummary.critical24h} Critical • ${windowsEventSummary.error24h} Error`)}</span><span class="health-kpi-note">Last 24h${windowsEventSummary.lastCriticalUtc ? ` • Last Critical ${escapeHtml(healthAgeText(windowsEventSummary.lastCriticalUtc))}` : ""}</span></div>
         <div class="health-chip"><span class="health-chip-label">Boot diagnostics</span><span class="health-chip-value">${escapeHtml(vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown")}</span></div>
       </div>
 
@@ -3807,8 +3873,13 @@ function healthBuildVmCard(result, index) {
         <details><summary>Network &amp; security configuration</summary><div class="health-details-body"><h4 class="health-section-heading">NIC configuration</h4>${networkTable}<h4 class="health-section-heading">Effective network security groups</h4>${nsgTable}</div></details>
         <details><summary>Azure alerts &amp; recent changes</summary><div class="health-details-body"><h4 class="health-section-heading">Active fired alerts</h4>${alertTable}<h4 class="health-section-heading">Azure Activity Log - last 24 hours</h4>${activityTable}</div></details>
         <details><summary>Resource Health history</summary><div class="health-details-body"><p class="field-help">Current summary: <strong>${escapeHtml(rh.summary || rh.title || view.resourceHealth)}</strong> • Context: <strong>${escapeHtml(rh.context || "Unknown")}</strong> • Reason: <strong>${escapeHtml(rh.reasonType || rh.category || "Unknown")}</strong> • Reported: <strong>${escapeHtml(healthFormatDateTime(rh.reportedTime))}</strong>${rh.resolutionETA ? ` • Resolution ETA: <strong>${escapeHtml(healthFormatDateTime(rh.resolutionETA))}</strong>` : ""}</p><h4 class="health-section-heading">Azure recommended actions</h4>${rhRecommendedHtml}<h4 class="health-section-heading">Availability history</h4>${resourceHistoryTable}</div></details>
+        <details><summary>Windows Event Viewer</summary><div class="health-details-body">
+          <p class="field-help">Effective LAW: <strong>${escapeHtml(monitoring.regionalLawName)}</strong> • Last 24 hours • Critical: <strong>${escapeHtml(windowsEventSummary.critical24h)}</strong> • Error: <strong>${escapeHtml(windowsEventSummary.error24h)}</strong>${windowsEventSummary.lastCriticalUtc ? ` • Last Critical: <strong>${escapeHtml(healthFormatDateTime(windowsEventSummary.lastCriticalUtc))}</strong> (${escapeHtml(healthAgeText(windowsEventSummary.lastCriticalUtc))})` : ""}</p>
+          <p class="health-inline-note">Critical events inside the selected diagnostic period can raise VM Health to Critical. Error events are displayed for investigation but do not automatically change the overall VM status.</p>
+          ${windowsEventTable}
+        </div></details>
         <details><summary>VM extensions</summary><div class="health-details-body">${extensionTable}</div></details>
-        <details><summary>Monitoring / Regional LAW / AMA / DCR</summary><div class="health-details-body"><p class="field-help">Effective LAW: <strong>${escapeHtml(monitoring.regionalLawName)}</strong>${monitoring.regionalLawFallbackUsed ? ` • <strong>Fallback used</strong>: ${escapeHtml(monitoring.regionalLawPrimaryName || "central-law-weu-law")} → ${escapeHtml(monitoring.regionalLawFallbackName || monitoring.regionalLawName)}` : ` • Primary LAW used: <strong>${escapeHtml(monitoring.regionalLawPrimaryName || monitoring.regionalLawName)}</strong>`}${monitoring.regionalLawLocation ? ` • LAW region: <strong>${escapeHtml(monitoring.regionalLawLocation)}</strong>` : ""}${monitoring.regionalLawResourceGroup ? ` • LAW RG: <strong>${escapeHtml(monitoring.regionalLawResourceGroup)}</strong>` : ""} • LAW lookup: <strong>${escapeHtml(monitoring.regionalLawLookupStatus)}</strong> • Workspace ID: <strong>${escapeHtml(monitoring.regionalLawWorkspaceId || "Unknown")}</strong> • AMA: <strong>${escapeHtml(monitoring.amaInstalled ? monitoring.amaProvisioningState : "Not detected")}</strong> • DCR associations: <strong>${escapeHtml(monitoring.dcrCount)}</strong> • VM Insights data: <strong>${escapeHtml(monitoring.vmInsightsDataAvailable ? "Available" : "Unknown")}</strong> • Last heartbeat: <strong>${escapeHtml(healthFormatDateTime(monitoring.heartbeatUtc))}</strong> (${escapeHtml(healthAgeText(monitoring.heartbeatUtc))})</p>${monitoring.regionalLawFallbackUsed ? `<p class="health-inline-note"><strong>Last-resort LAW fallback was used.</strong> No Heartbeat, InsightsMetrics or Perf rows matching this VM were returned from the primary regional LAW.</p>` : ""}<h4 class="health-section-heading">LAW query diagnostics</h4><div class="health-table-wrap"><table class="health-table"><thead><tr><th>Source</th><th>Query</th><th>Logic App status</th><th>HTTP</th><th>Error</th></tr></thead><tbody>${monitoring.regionalLawFallbackUsed ? `<tr><td>Primary</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceHttpStatus || "-")}</td><td>-</td></tr>` : ""}<tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatErrorCode || monitoring.lawDiagnostics?.heartbeatErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestErrorCode || monitoring.lawDiagnostics?.guestErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceErrorCode || monitoring.lawDiagnostics?.performanceErrorMessage || "-")}</td></tr></tbody></table></div><h4 class="health-section-heading">DCR associations</h4>${dcrTable}<h4 class="health-section-heading">LAW performance counters (when collected)</h4>${lawPerformanceTable}</div></details>
+        <details><summary>Monitoring / Regional LAW / AMA / DCR</summary><div class="health-details-body"><p class="field-help">Effective LAW: <strong>${escapeHtml(monitoring.regionalLawName)}</strong>${monitoring.regionalLawFallbackUsed ? ` • <strong>Fallback used</strong>: ${escapeHtml(monitoring.regionalLawPrimaryName || "central-law-weu-law")} → ${escapeHtml(monitoring.regionalLawFallbackName || monitoring.regionalLawName)}` : ` • Primary LAW used: <strong>${escapeHtml(monitoring.regionalLawPrimaryName || monitoring.regionalLawName)}</strong>`}${monitoring.regionalLawLocation ? ` • LAW region: <strong>${escapeHtml(monitoring.regionalLawLocation)}</strong>` : ""}${monitoring.regionalLawResourceGroup ? ` • LAW RG: <strong>${escapeHtml(monitoring.regionalLawResourceGroup)}</strong>` : ""} • LAW lookup: <strong>${escapeHtml(monitoring.regionalLawLookupStatus)}</strong> • Workspace ID: <strong>${escapeHtml(monitoring.regionalLawWorkspaceId || "Unknown")}</strong> • AMA: <strong>${escapeHtml(monitoring.amaInstalled ? monitoring.amaProvisioningState : "Not detected")}</strong> • DCR associations: <strong>${escapeHtml(monitoring.dcrCount)}</strong> • VM Insights data: <strong>${escapeHtml(monitoring.vmInsightsDataAvailable ? "Available" : "Unknown")}</strong> • Last heartbeat: <strong>${escapeHtml(healthFormatDateTime(monitoring.heartbeatUtc))}</strong> (${escapeHtml(healthAgeText(monitoring.heartbeatUtc))})</p>${monitoring.regionalLawFallbackUsed ? `<p class="health-inline-note"><strong>Last-resort LAW fallback was used.</strong> No Heartbeat, InsightsMetrics or Perf rows matching this VM were returned from the primary regional LAW.</p>` : ""}<h4 class="health-section-heading">LAW query diagnostics</h4><div class="health-table-wrap"><table class="health-table"><thead><tr><th>Source</th><th>Query</th><th>Logic App status</th><th>HTTP</th><th>Error</th></tr></thead><tbody>${monitoring.regionalLawFallbackUsed ? `<tr><td>Primary</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>Windows events</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryWindowsEventStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryWindowsEventHttpStatus || "-")}</td><td>-</td></tr>` : ""}<tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatErrorCode || monitoring.lawDiagnostics?.heartbeatErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestErrorCode || monitoring.lawDiagnostics?.guestErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceErrorCode || monitoring.lawDiagnostics?.performanceErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Windows events</td><td>${escapeHtml(monitoring.lawDiagnostics?.windowsEventStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.windowsEventHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.windowsEventErrorCode || monitoring.lawDiagnostics?.windowsEventErrorMessage || "-")}</td></tr></tbody></table></div><h4 class="health-section-heading">DCR associations</h4>${dcrTable}<h4 class="health-section-heading">LAW performance counters (when collected)</h4>${lawPerformanceTable}</div></details>
         <details><summary>Backup &amp; patching</summary><div class="health-details-body"><h4 class="health-section-heading">Azure Backup</h4>${backupTable}<h4 class="health-section-heading">Update Manager</h4><p class="field-help">Assessment: <strong>${escapeHtml(healthFormatDateTime(patch.lastAssessmentUtc))}</strong> (${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}) • Reboot pending: <strong>${escapeHtml(patch.rebootPending === null ? "Unknown" : String(patch.rebootPending))}</strong></p>${patchTable}</div></details>
         <details><summary>Boot diagnostics</summary><div class="health-details-body"><p class="field-help">Boot diagnostics configuration: <strong>${escapeHtml(vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown")}</strong>.</p><p class="health-inline-note">For security, this report does not return temporary screenshot/serial-log SAS URLs. Use <strong>Open VM in Azure</strong> and the Boot diagnostics blade when detailed boot artifacts are needed.</p></div></details>
         <details><summary>Recommendations</summary><div class="health-details-body"><ol class="health-recommendations">${view.recommendations.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ol></div></details>
@@ -3857,6 +3928,8 @@ function renderHealthStatus(result) {
           ["CPU average", healthIsRunning(v.powerState) ? healthFormatPercent(v.platform.cpu.average) : "N/A"], ["CPU maximum", healthIsRunning(v.powerState) ? healthFormatPercent(v.platform.cpu.maximum) : "N/A"],
           ["vCPUs", healthFiniteNumber(item?.hardware?.vCpuCount) === null ? "Unknown" : healthFormatNumber(item.hardware.vCpuCount, 0)],
           ["RAM GB", healthFiniteNumber(item?.hardware?.memoryMB) === null ? "Unknown" : healthFormatNumber(item.hardware.memoryMB / 1024, 1)],
+          ["Windows Critical events (24h)", v.windowsEventSummary.critical24h],
+          ["Windows Error events (24h)", v.windowsEventSummary.error24h],
           ["Memory available", healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A"], ["Lowest disk free", healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.lowestDiskFreePercent) : "N/A"],
           ["Backup protection", v.backup.protected], ["Last backup status", v.backup.lastBackupStatus], ["Last backup", v.backup.lastBackupTime || "Unknown"], ["Patch pending", v.patch.available ? v.patch.totalPending : "Unknown"], ["Regional LAW", v.monitoring.regionalLawName], ["Heartbeat", v.monitoring.heartbeatState]
         ];
