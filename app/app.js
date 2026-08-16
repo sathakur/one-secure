@@ -2832,17 +2832,26 @@ function healthReadLawPerformance(result) {
 }
 
 function healthReadWindowsEvents(result) {
-  return healthRowsFromLawQuery(result?.windowsEvents).map((row) => ({
-    timeGenerated: row.TimeGenerated || null,
-    computer: String(row.Computer || ""),
-    eventLog: String(row.EventLog || "Unknown"),
-    level: String(row.EventLevelName || "Unknown"),
-    eventLevel: healthFiniteNumber(row.EventLevel),
-    eventId: row.EventID ?? "Unknown",
-    source: String(row.Source || "Unknown"),
-    message: String(row.Message || ""),
-    resourceId: String(row.ResourceId || "")
-  }));
+  return healthRowsFromLawQuery(result?.windowsEvents).map((row) => {
+    const firstSeen = row.FirstSeen || row.TimeGenerated || null;
+    const lastSeen = row.LastSeen || row.TimeGenerated || null;
+    const occurrences = Math.max(1, Math.trunc(healthFiniteNumber(row.Occurrences) ?? 1));
+
+    return {
+      firstSeen,
+      lastSeen,
+      timeGenerated: lastSeen,
+      computer: String(row.Computer || ""),
+      eventLog: String(row.EventLog || "Unknown"),
+      level: String(row.Level || row.EventLevelName || "Unknown"),
+      eventLevel: healthFiniteNumber(row.EventLevel),
+      eventId: row.EventID ?? "Unknown",
+      source: String(row.Source || "Unknown"),
+      occurrences,
+      message: String(row.Message || ""),
+      resourceId: String(row.ResourceId || "")
+    };
+  });
 }
 
 function healthShortText(value, maxLength = 300) {
@@ -3110,7 +3119,7 @@ function deriveVmHealth(result) {
       recommendations: ["Review the Logic App run history and the failed data source before retrying the diagnostic."],
       powerState: "Unknown", provisioningState: "Unknown", agentStatus: "Unknown", resourceHealth: "Unknown",
       platform: healthReadPlatform({}), guest: healthReadGuest({}), patch: healthReadPatch({}), monitoring: healthReadMonitoring({}, healthReadGuest({})),
-      backup: healthReadBackup({}), alerts: [], activity: [], resourceHistory: [], effectiveNSGs: [], windowsEvents: [], windowsEventSummary: { critical24h: 0, error24h: 0, recentCritical: 0, lastCriticalUtc: null }, freshness: { rows: [], state: "Unknown" }
+      backup: healthReadBackup({}), alerts: [], activity: [], resourceHistory: [], effectiveNSGs: [], windowsEvents: [], windowsEventSummary: { uniqueTotal: 0, criticalUnique24h: 0, errorUnique24h: 0, totalOccurrences: 0, criticalOccurrences: 0, errorOccurrences: 0, recentCriticalUnique: 0, recentCriticalOccurrences: 0, lastCriticalUtc: null }, freshness: { rows: [], state: "Unknown" }
     };
   }
 
@@ -3135,19 +3144,31 @@ function deriveVmHealth(result) {
   const diagnosticPeriodMinutes = Number(result?.periodMinutes || 60);
   const criticalWindowsEvents = windowsEvents.filter((event) => /^critical$/i.test(event.level));
   const errorWindowsEvents = windowsEvents.filter((event) => /^error$/i.test(event.level));
+
   const recentCriticalWindowsEvents = criticalWindowsEvents.filter((event) => {
-    const age = healthAgeMinutes(event.timeGenerated);
+    const age = healthAgeMinutes(event.lastSeen || event.timeGenerated);
     return age !== null && age <= diagnosticPeriodMinutes;
   });
+
   const lastCriticalWindowsEvent = [...criticalWindowsEvents]
-    .filter((event) => event.timeGenerated)
-    .sort((a, b) => new Date(b.timeGenerated) - new Date(a.timeGenerated))[0] || null;
+    .filter((event) => event.lastSeen || event.timeGenerated)
+    .sort((a, b) => new Date(b.lastSeen || b.timeGenerated) - new Date(a.lastSeen || a.timeGenerated))[0] || null;
+
+  const sumOccurrences = (events) => events.reduce(
+    (sum, event) => sum + Math.max(1, Number(event.occurrences || 1)),
+    0
+  );
 
   const windowsEventSummary = {
-    critical24h: criticalWindowsEvents.length,
-    error24h: errorWindowsEvents.length,
-    recentCritical: recentCriticalWindowsEvents.length,
-    lastCriticalUtc: lastCriticalWindowsEvent?.timeGenerated || null
+    uniqueTotal: windowsEvents.length,
+    criticalUnique24h: criticalWindowsEvents.length,
+    errorUnique24h: errorWindowsEvents.length,
+    totalOccurrences: sumOccurrences(windowsEvents),
+    criticalOccurrences: sumOccurrences(criticalWindowsEvents),
+    errorOccurrences: sumOccurrences(errorWindowsEvents),
+    recentCriticalUnique: recentCriticalWindowsEvents.length,
+    recentCriticalOccurrences: sumOccurrences(recentCriticalWindowsEvents),
+    lastCriticalUtc: lastCriticalWindowsEvent?.lastSeen || lastCriticalWindowsEvent?.timeGenerated || null
   };
 
   if (powerState !== "Unknown" && !running) healthAddFinding(findings, "Critical", "VM_NOT_RUNNING", `VM power state is ${powerState}.`);
@@ -3179,10 +3200,20 @@ function deriveVmHealth(result) {
   if (highAlerts.length) healthAddFinding(findings, "Critical", "ACTIVE_ALERT", `${highAlerts.length} active Sev0/Sev1 Azure Monitor alert(s) target this VM.`);
   else if (alerts.length) healthAddFinding(findings, "Warning", "ACTIVE_ALERT", `${alerts.length} active Azure Monitor alert(s) target this VM.`);
 
-  if (windowsEventSummary.recentCritical > 0) {
-    healthAddFinding(findings, "Critical", "WINDOWS_CRITICAL_EVENT", `${windowsEventSummary.recentCritical} Critical Windows Event Viewer event(s) occurred during the selected ${diagnosticPeriodMinutes}-minute diagnostic period.`);
-  } else if (windowsEventSummary.critical24h > 0) {
-    healthAddFinding(findings, "Warning", "WINDOWS_CRITICAL_EVENT_HISTORY", `${windowsEventSummary.critical24h} Critical Windows Event Viewer event(s) occurred in the last 24 hours.`);
+  if (windowsEventSummary.recentCriticalUnique > 0) {
+    healthAddFinding(
+      findings,
+      "Critical",
+      "WINDOWS_CRITICAL_EVENT",
+      `${windowsEventSummary.recentCriticalUnique} unique Critical Windows event type(s) occurred during the selected ${diagnosticPeriodMinutes}-minute diagnostic period (${windowsEventSummary.recentCriticalOccurrences} occurrence(s)).`
+    );
+  } else if (windowsEventSummary.criticalUnique24h > 0) {
+    healthAddFinding(
+      findings,
+      "Warning",
+      "WINDOWS_CRITICAL_EVENT_HISTORY",
+      `${windowsEventSummary.criticalUnique24h} unique Critical Windows event type(s) occurred in the last 24 hours (${windowsEventSummary.criticalOccurrences} occurrence(s)).`
+    );
   }
 
   if (backup.protected.toLowerCase() !== "protected") healthAddFinding(findings, "Warning", "BACKUP_PROTECTION", `Azure Backup protection status is ${backup.protected}.`);
@@ -3226,7 +3257,7 @@ function deriveVmHealth(result) {
   if (monitoring.regionalLawFallbackUsed) recommendations.push(`Primary LAW ${monitoring.regionalLawPrimaryName || "central-law-weu-law"} had no matching VM telemetry, so ${monitoring.regionalLawName} was queried as the last-resort fallback. Confirm whether this VM is expected to report to the fallback LAW.`);
   if (!monitoring.vmInsightsDataAvailable) recommendations.push(`Validate VM Insights / InsightsMetrics collection in effective LAW ${monitoring.regionalLawName} before relying on guest memory/disk health.`);
   if (monitoring.heartbeatAgeMinutes !== null && monitoring.heartbeatAgeMinutes > 30) recommendations.push("Investigate the stale VM Insights heartbeat: check AMA extension state, DCR association, outbound connectivity and workspace ingestion.");
-  if (windowsEventSummary.critical24h > 0) recommendations.push("Review recent Critical Windows System/Application events, starting with the newest Event ID and source.");
+  if (windowsEventSummary.criticalUnique24h > 0) recommendations.push("Review the unique Critical Windows System/Application event types, starting with the highest-occurrence and most recently seen Event ID/source.");
   if (patch.criticalSecurityCount > 0) recommendations.push("Review pending Critical/Security patches in Azure Update Manager and schedule remediation through the approved patch process.");
   if (backup.protected.toLowerCase() !== "protected" || /unhealthy|failed/i.test(backup.lastBackupStatus)) recommendations.push("Review Azure Backup protection and the latest backup job before relying on recovery-point availability.");
   if (recommendations.length === 0) recommendations.push("No immediate remediation recommendation was generated from the configured read-only checks.");
@@ -3288,7 +3319,7 @@ function healthCopyText(result) {
   const memoryMb = healthFiniteNumber(hardware.memoryMB);
   const memoryGb = memoryMb === null ? null : memoryMb / 1024;
   return [
-    `VM Health Diagnostic V2.6.3`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
+    `VM Health Diagnostic V2.6.8`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
     `Power: ${v.powerState}`, `Resource Health: ${v.resourceHealth}`, `Active alerts: ${v.alerts.length}`,
     `CPU avg/max: ${healthIsRunning(v.powerState) ? `${healthFormatPercent(v.platform.cpu.average)} / ${healthFormatPercent(v.platform.cpu.maximum)}` : "N/A - VM not running"}`,
     `vCPUs: ${vCpuCount === null ? "Unknown" : healthFormatNumber(vCpuCount, 0)}`,
@@ -3297,7 +3328,7 @@ function healthCopyText(result) {
     `Lowest disk free: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.lowestDiskFreePercent) : "N/A - VM not running"}`,
     `Backup: ${v.backup.protected}; last=${v.backup.lastBackupStatus}; ${healthAgeText(v.backup.lastBackupTime)}`,
     `Patch pending: ${v.patch.available ? v.patch.totalPending : "Unknown"}`,
-    `Windows events (24h): ${v.windowsEventSummary.critical24h} Critical / ${v.windowsEventSummary.error24h} Error`,
+    `Windows events (24h): ${v.windowsEventSummary.uniqueTotal} unique (${v.windowsEventSummary.criticalUnique24h} Critical / ${v.windowsEventSummary.errorUnique24h} Error), ${v.windowsEventSummary.totalOccurrences} occurrence(s)`,
     `Regional LAW: ${v.monitoring.regionalLawName}`, `Monitoring: ${v.monitoring.heartbeatState}`,
     `Findings:`, ...v.findings.map((f) => `- ${f.severity}: ${f.message}`), `Recommendations:`, ...v.recommendations.map((r) => `- ${r}`)
   ].join("\n");
@@ -3615,7 +3646,7 @@ function healthDownloadPdfReport(result) {
       </div>
       <div class="health-pdf-meta">
         <div><strong>Generated:</strong> ${escapeHtml(generatedDisplay)}</div>
-        <div><strong>Portal:</strong> VM Health Diagnostic V2.6.3</div>
+        <div><strong>Portal:</strong> VM Health Diagnostic V2.6.8</div>
       </div>
     </header>
 
@@ -3786,11 +3817,13 @@ function healthBuildVmCard(result, index) {
     { label: "Summary", value: (r) => r?.properties?.summary || r?.properties?.title || "" }
   ], view.resourceHistory);
   const windowsEventTable = healthBuildMiniTable([
-    { label: "Time", value: (r) => healthFormatDateTime(r.timeGenerated) },
     { label: "Level", value: (r) => r.level },
     { label: "Log", value: (r) => r.eventLog },
     { label: "Event ID", value: (r) => r.eventId },
     { label: "Source", value: (r) => r.source },
+    { label: "Occurrences", value: (r) => r.occurrences },
+    { label: "First seen", value: (r) => healthFormatDateTime(r.firstSeen) },
+    { label: "Last seen", value: (r) => healthFormatDateTime(r.lastSeen) },
     { label: "Message", value: (r) => healthShortText(r.message, 320) }
   ], windowsEvents);
 
@@ -3845,7 +3878,11 @@ function healthBuildVmCard(result, index) {
         <div class="health-chip"><span class="health-chip-label">Patch assessment</span><span class="health-chip-value">${escapeHtml(patchDisplay)}</span><span class="health-kpi-note">${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}</span></div>
         <div class="health-chip"><span class="health-chip-label">Monitoring</span><span class="health-chip-value">${escapeHtml(monitorDisplay)}</span><span class="health-kpi-note">${escapeHtml(monitoring.regionalLawName)} • Heartbeat: ${escapeHtml(monitoring.heartbeatState)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Data freshness</span><span class="health-chip-value">${escapeHtml(view.freshness.state)}</span></div>
-        <div class="health-chip"><span class="health-chip-label">Windows events</span><span class="health-chip-value">${escapeHtml(`${windowsEventSummary.critical24h} Critical • ${windowsEventSummary.error24h} Error`)}</span><span class="health-kpi-note">Last 24h${windowsEventSummary.lastCriticalUtc ? ` • Last Critical ${escapeHtml(healthAgeText(windowsEventSummary.lastCriticalUtc))}` : ""}</span></div>
+        <div class="health-chip">
+          <span class="health-chip-label">Windows events</span>
+          <span class="health-chip-value">${escapeHtml(`${windowsEventSummary.uniqueTotal} unique`)}</span>
+          <span class="health-kpi-note">${escapeHtml(`${windowsEventSummary.criticalUnique24h} Critical • ${windowsEventSummary.errorUnique24h} Error • ${windowsEventSummary.totalOccurrences} occurrence${windowsEventSummary.totalOccurrences === 1 ? "" : "s"}`)}${windowsEventSummary.lastCriticalUtc ? ` • Last Critical ${escapeHtml(healthAgeText(windowsEventSummary.lastCriticalUtc))}` : ""}</span>
+        </div>
         <div class="health-chip"><span class="health-chip-label">Boot diagnostics</span><span class="health-chip-value">${escapeHtml(vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown")}</span></div>
       </div>
 
@@ -3874,8 +3911,8 @@ function healthBuildVmCard(result, index) {
         <details><summary>Azure alerts &amp; recent changes</summary><div class="health-details-body"><h4 class="health-section-heading">Active fired alerts</h4>${alertTable}<h4 class="health-section-heading">Azure Activity Log - last 24 hours</h4>${activityTable}</div></details>
         <details><summary>Resource Health history</summary><div class="health-details-body"><p class="field-help">Current summary: <strong>${escapeHtml(rh.summary || rh.title || view.resourceHealth)}</strong> • Context: <strong>${escapeHtml(rh.context || "Unknown")}</strong> • Reason: <strong>${escapeHtml(rh.reasonType || rh.category || "Unknown")}</strong> • Reported: <strong>${escapeHtml(healthFormatDateTime(rh.reportedTime))}</strong>${rh.resolutionETA ? ` • Resolution ETA: <strong>${escapeHtml(healthFormatDateTime(rh.resolutionETA))}</strong>` : ""}</p><h4 class="health-section-heading">Azure recommended actions</h4>${rhRecommendedHtml}<h4 class="health-section-heading">Availability history</h4>${resourceHistoryTable}</div></details>
         <details><summary>Windows Event Viewer</summary><div class="health-details-body">
-          <p class="field-help">Effective LAW: <strong>${escapeHtml(monitoring.regionalLawName)}</strong> • Last 24 hours • Critical: <strong>${escapeHtml(windowsEventSummary.critical24h)}</strong> • Error: <strong>${escapeHtml(windowsEventSummary.error24h)}</strong>${windowsEventSummary.lastCriticalUtc ? ` • Last Critical: <strong>${escapeHtml(healthFormatDateTime(windowsEventSummary.lastCriticalUtc))}</strong> (${escapeHtml(healthAgeText(windowsEventSummary.lastCriticalUtc))})` : ""}</p>
-          <p class="health-inline-note">Critical events inside the selected diagnostic period can raise VM Health to Critical. Error events are displayed for investigation but do not automatically change the overall VM status.</p>
+          <p class="field-help">Effective LAW: <strong>${escapeHtml(monitoring.regionalLawName)}</strong> • Last 24 hours • Unique event types: <strong>${escapeHtml(windowsEventSummary.uniqueTotal)}</strong> • Critical: <strong>${escapeHtml(windowsEventSummary.criticalUnique24h)}</strong> • Error: <strong>${escapeHtml(windowsEventSummary.errorUnique24h)}</strong> • Total occurrences: <strong>${escapeHtml(windowsEventSummary.totalOccurrences)}</strong>${windowsEventSummary.lastCriticalUtc ? ` • Last Critical: <strong>${escapeHtml(healthFormatDateTime(windowsEventSummary.lastCriticalUtc))}</strong> (${escapeHtml(healthAgeText(windowsEventSummary.lastCriticalUtc))})` : ""}</p>
+          <p class="health-inline-note">Repeated Event Viewer records are grouped by Level + Log + Event ID + Source. A unique Critical event type seen inside the selected diagnostic period can raise VM Health to Critical. Error event types are displayed for investigation but do not automatically change overall VM status.</p>
           ${windowsEventTable}
         </div></details>
         <details><summary>VM extensions</summary><div class="health-details-body">${extensionTable}</div></details>
@@ -3928,8 +3965,10 @@ function renderHealthStatus(result) {
           ["CPU average", healthIsRunning(v.powerState) ? healthFormatPercent(v.platform.cpu.average) : "N/A"], ["CPU maximum", healthIsRunning(v.powerState) ? healthFormatPercent(v.platform.cpu.maximum) : "N/A"],
           ["vCPUs", healthFiniteNumber(item?.hardware?.vCpuCount) === null ? "Unknown" : healthFormatNumber(item.hardware.vCpuCount, 0)],
           ["RAM GB", healthFiniteNumber(item?.hardware?.memoryMB) === null ? "Unknown" : healthFormatNumber(item.hardware.memoryMB / 1024, 1)],
-          ["Windows Critical events (24h)", v.windowsEventSummary.critical24h],
-          ["Windows Error events (24h)", v.windowsEventSummary.error24h],
+          ["Windows unique event types (24h)", v.windowsEventSummary.uniqueTotal],
+          ["Windows unique Critical event types (24h)", v.windowsEventSummary.criticalUnique24h],
+          ["Windows unique Error event types (24h)", v.windowsEventSummary.errorUnique24h],
+          ["Windows event occurrences (24h)", v.windowsEventSummary.totalOccurrences],
           ["Memory available", healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A"], ["Lowest disk free", healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.lowestDiskFreePercent) : "N/A"],
           ["Backup protection", v.backup.protected], ["Last backup status", v.backup.lastBackupStatus], ["Last backup", v.backup.lastBackupTime || "Unknown"], ["Patch pending", v.patch.available ? v.patch.totalPending : "Unknown"], ["Regional LAW", v.monitoring.regionalLawName], ["Heartbeat", v.monitoring.heartbeatState]
         ];
