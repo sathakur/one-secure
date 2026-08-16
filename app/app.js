@@ -3229,7 +3229,7 @@ function healthCopyText(result) {
   const v = deriveVmHealth(result);
   const vm = result?.vm || {};
   return [
-    `VM Health Diagnostic V2.8`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
+    `VM Health Diagnostic V2.6`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
     `Power: ${v.powerState}`, `Resource Health: ${v.resourceHealth}`, `Active alerts: ${v.alerts.length}`,
     `CPU avg/max: ${healthIsRunning(v.powerState) ? `${healthFormatPercent(v.platform.cpu.average)} / ${healthFormatPercent(v.platform.cpu.maximum)}` : "N/A - VM not running"}`,
     `Memory available: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A - VM not running"}`,
@@ -3244,350 +3244,6 @@ function healthDownloadFile(filename, content, type) {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a"); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-}
-
-
-function healthDownloadPdfReport(result) {
-  const hostname = String(result?.hostname || result?.vm?.VMName || "vm").trim() || "vm";
-  const safeHostname = hostname.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
-  const generatedUtc = new Date();
-  const generatedDisplay = generatedUtc.toLocaleString();
-  const fileDate = generatedUtc.toISOString().replace(/[:]/g, "-").replace(/\.\d{3}Z$/, "Z");
-
-  if (!healthResultArea) {
-    alert("VM health result is not available for PDF export.");
-    return;
-  }
-
-  const reportClone = healthResultArea.cloneNode(true);
-
-  // PDF must contain ALL diagnostic sections, even when they are collapsed
-  // in the interactive portal.
-  reportClone.querySelectorAll("details").forEach((detail) => {
-    detail.setAttribute("open", "");
-    detail.open = true;
-  });
-
-  // Remove interactive-only content from the report.
-  reportClone.querySelectorAll(".health-action-bar").forEach((node) => node.remove());
-  reportClone.querySelectorAll(".health-kpi-action").forEach((node) => node.remove());
-  reportClone.querySelectorAll(".health-detail-click-focus").forEach((node) => node.classList.remove("health-detail-click-focus"));
-
-  const printableHtml = reportClone.innerHTML;
-
-  const reportWindow = window.open("", "_blank");
-  if (!reportWindow) {
-    alert("The browser blocked the PDF report window. Allow pop-ups for this portal and try again.");
-    return;
-  }
-
-  const cssUrl = new URL("/styles.css", window.location.origin).href;
-  const reportTitle = `vm-health-${safeHostname}-${fileDate}`;
-
-  reportWindow.document.open();
-  reportWindow.document.write(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>${escapeHtml(reportTitle)}</title>
-  <link rel="stylesheet" href="${escapeHtml(cssUrl)}">
-  <style>
-    @page {
-      size: A4 landscape;
-      margin: 10mm;
-    }
-
-    html,
-    body {
-      margin: 0 !important;
-      padding: 0 !important;
-      background: #ffffff !important;
-      color: #102a43 !important;
-      font-family: Arial, Helvetica, sans-serif !important;
-      -webkit-print-color-adjust: exact !important;
-      print-color-adjust: exact !important;
-    }
-
-    body {
-      width: 100% !important;
-      max-width: none !important;
-    }
-
-    .health-pdf-shell {
-      width: 100% !important;
-      max-width: none !important;
-      margin: 0 !important;
-      padding: 0 !important;
-    }
-
-    .health-pdf-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-end;
-      gap: 20px;
-      padding: 0 0 8px;
-      margin-bottom: 10px;
-      border-bottom: 2px solid #0f6cbd;
-    }
-
-    .health-pdf-header h1 {
-      margin: 0;
-      font-size: 18pt;
-      color: #0b2239;
-    }
-
-    .health-pdf-header p {
-      margin: 3px 0 0;
-      color: #526b80;
-      font-size: 8.5pt;
-    }
-
-    .health-pdf-meta {
-      text-align: right;
-      font-size: 8pt;
-      color: #526b80;
-      white-space: nowrap;
-    }
-
-    #healthResultArea,
-    .health-results,
-    .health-result-area {
-      width: 100% !important;
-      max-width: none !important;
-      margin: 0 !important;
-    }
-
-    .health-action-bar,
-    .health-kpi-action,
-    button,
-    .secondary {
-      display: none !important;
-    }
-
-    .health-vm-card,
-    .health-status-banner,
-    .health-overview-grid,
-    .health-findings,
-    .health-note {
-      box-shadow: none !important;
-    }
-
-    .health-vm-card {
-      border: 1px solid #cddbe7 !important;
-      margin: 0 0 10px !important;
-      break-inside: auto;
-    }
-
-    .health-chip-grid {
-      grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
-      gap: 6px !important;
-    }
-
-    .health-chip {
-      min-height: 0 !important;
-      padding: 8px 9px !important;
-      border: 1px solid #d6e2ec !important;
-      box-shadow: none !important;
-      transform: none !important;
-      background: #ffffff !important;
-    }
-
-    .health-chip-label {
-      font-size: 7.5pt !important;
-    }
-
-    .health-chip-value {
-      font-size: 10.5pt !important;
-    }
-
-    .health-kpi-note,
-    .health-disk-system-note,
-    .health-disk-lowest {
-      font-size: 7.5pt !important;
-    }
-
-    .health-disk-pill {
-      font-size: 7.5pt !important;
-      padding: 2px 6px !important;
-    }
-
-    .health-findings {
-      break-inside: avoid-page;
-    }
-
-    .health-findings h4 {
-      margin-top: 0 !important;
-    }
-
-    .health-findings li {
-      font-size: 8pt !important;
-      line-height: 1.35 !important;
-      margin-bottom: 2px !important;
-    }
-
-    .health-details details {
-      display: block !important;
-      border-top: 1px solid #d6e2ec !important;
-      break-inside: auto !important;
-    }
-
-    .health-details details[open] > * {
-      display: block !important;
-    }
-
-    .health-details summary {
-      display: block !important;
-      padding: 7px 9px !important;
-      font-size: 9pt !important;
-      font-weight: 700 !important;
-      color: #0b2239 !important;
-      background: #f5f9fc !important;
-      break-after: avoid-page;
-      list-style: none !important;
-    }
-
-    .health-details summary::-webkit-details-marker {
-      display: none !important;
-    }
-
-    .health-details-body {
-      display: block !important;
-      padding: 8px 9px !important;
-    }
-
-    .health-section-heading {
-      margin: 8px 0 5px !important;
-      font-size: 8.5pt !important;
-      break-after: avoid-page;
-    }
-
-    .health-table-wrap {
-      overflow: visible !important;
-      width: 100% !important;
-      margin-bottom: 7px !important;
-    }
-
-    .health-table-wrap table,
-    .health-mini-table {
-      width: 100% !important;
-      border-collapse: collapse !important;
-      table-layout: auto !important;
-      font-size: 7.2pt !important;
-    }
-
-    .health-table-wrap thead,
-    .health-mini-table thead {
-      display: table-header-group !important;
-    }
-
-    .health-table-wrap tr,
-    .health-mini-table tr {
-      break-inside: avoid !important;
-    }
-
-    .health-table-wrap th,
-    .health-table-wrap td,
-    .health-mini-table th,
-    .health-mini-table td {
-      padding: 3px 4px !important;
-      border: 1px solid #dbe5ed !important;
-      vertical-align: top !important;
-      white-space: normal !important;
-      overflow-wrap: anywhere !important;
-    }
-
-    .health-metric-grid {
-      grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-      gap: 5px !important;
-    }
-
-    .health-metric-box {
-      padding: 6px 7px !important;
-      min-height: 0 !important;
-      box-shadow: none !important;
-    }
-
-    .health-metric-box span {
-      font-size: 7pt !important;
-    }
-
-    .health-metric-box strong {
-      font-size: 8.5pt !important;
-    }
-
-    .health-status-pill {
-      print-color-adjust: exact !important;
-      -webkit-print-color-adjust: exact !important;
-    }
-
-    .health-request-meta,
-    .health-vm-subtitle,
-    .field-help,
-    .health-empty,
-    .health-note {
-      font-size: 7.8pt !important;
-      line-height: 1.35 !important;
-    }
-
-    a {
-      color: #0f6cbd !important;
-      text-decoration: none !important;
-    }
-
-    @media print {
-      .health-pdf-header {
-        break-inside: avoid;
-      }
-
-      .health-overview-grid {
-        break-inside: avoid;
-      }
-
-      .health-vm-header {
-        break-after: avoid;
-      }
-    }
-  </style>
-</head>
-<body>
-  <main class="health-pdf-shell">
-    <header class="health-pdf-header">
-      <div>
-        <h1>Azure VM Health Diagnostic Report</h1>
-        <p>Complete diagnostic output for ${escapeHtml(hostname)}</p>
-      </div>
-      <div class="health-pdf-meta">
-        <div><strong>Generated:</strong> ${escapeHtml(generatedDisplay)}</div>
-        <div><strong>Portal version:</strong> VM Health Diagnostic V2.8</div>
-      </div>
-    </header>
-
-    <section id="healthResultArea">
-      ${printableHtml}
-    </section>
-  </main>
-</body>
-</html>`);
-  reportWindow.document.close();
-
-  const triggerPrint = () => {
-    try {
-      reportWindow.focus();
-      reportWindow.print();
-    } catch (error) {
-      console.error("Unable to open PDF print dialog.", error);
-      alert("The PDF report was prepared, but the browser could not open the print dialog.");
-    }
-  };
-
-  if (reportWindow.document.readyState === "complete") {
-    window.setTimeout(triggerPrint, 600);
-  } else {
-    reportWindow.addEventListener("load", () => {
-      window.setTimeout(triggerPrint, 600);
-    }, { once: true });
-  }
 }
 
 function healthDiskFreeStatus(percent) {
@@ -3758,11 +3414,7 @@ function healthBuildVmCard(result, index) {
       <div class="health-chip-grid">
         <div class="health-chip"><span class="health-chip-label">Power</span><span class="health-chip-value">${escapeHtml(view.powerState)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Resource Health</span><span class="health-chip-value">${escapeHtml(view.resourceHealth)}</span></div>
-        <button type="button" class="health-chip health-chip-clickable" data-health-detail="alerts" aria-label="View active Azure Monitor alert details">
-          <span class="health-chip-label">Active alerts</span>
-          <span class="health-chip-value">${escapeHtml(view.alerts.length)}</span>
-          <span class="health-kpi-action">View fired alerts <span aria-hidden="true">→</span></span>
-        </button>
+        <div class="health-chip"><span class="health-chip-label">Active alerts</span><span class="health-chip-value">${escapeHtml(view.alerts.length)}</span></div>
         <div class="health-chip"><span class="health-chip-label">CPU avg / max</span><span class="health-chip-value">${escapeHtml(runtimeMetric(view.platform.cpu.average))} / ${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</span></div>
         <div class="health-chip"><span class="health-chip-label">Memory available</span><span class="health-chip-value">${escapeHtml(memoryDisplay)}</span></div>
         <div class="health-chip health-disk-kpi">
@@ -3776,12 +3428,7 @@ function healthBuildVmCard(result, index) {
         </div>
         <div class="health-chip"><span class="health-chip-label">Network in / out</span><span class="health-chip-value">${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")} / ${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</span></div>
         <div class="health-chip"><span class="health-chip-label">Azure Backup</span><span class="health-chip-value">${escapeHtml(backup.protected)}</span><span class="health-kpi-note">${escapeHtml(backup.lastBackupStatus)} • ${escapeHtml(healthAgeText(backup.lastBackupTime))}</span></div>
-        <button type="button" class="health-chip health-chip-clickable" data-health-detail="patching" aria-label="View Azure Update Manager patch assessment details">
-          <span class="health-chip-label">Patch assessment</span>
-          <span class="health-chip-value">${escapeHtml(patchDisplay)}</span>
-          <span class="health-kpi-note">${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}</span>
-          <span class="health-kpi-action">View patch details <span aria-hidden="true">→</span></span>
-        </button>
+        <div class="health-chip"><span class="health-chip-label">Patch assessment</span><span class="health-chip-value">${escapeHtml(patchDisplay)}</span><span class="health-kpi-note">${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}</span></div>
         <div class="health-chip"><span class="health-chip-label">Monitoring</span><span class="health-chip-value">${escapeHtml(monitorDisplay)}</span><span class="health-kpi-note">${escapeHtml(monitoring.regionalLawName)} • Heartbeat: ${escapeHtml(monitoring.heartbeatState)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Data freshness</span><span class="health-chip-value">${escapeHtml(view.freshness.state)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Boot diagnostics</span><span class="health-chip-value">${escapeHtml(vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown")}</span></div>
@@ -3789,7 +3436,6 @@ function healthBuildVmCard(result, index) {
 
       <div class="health-action-bar">
         <button type="button" class="secondary" data-health-action="copy" data-health-index="${index}">Copy for incident</button>
-        <button type="button" class="secondary" data-health-action="pdf" data-health-index="${index}">Download PDF</button>
         <button type="button" class="secondary" data-health-action="json" data-health-index="${index}">Download JSON</button>
         <button type="button" class="secondary" data-health-action="csv" data-health-index="${index}">Export CSV</button>
         <button type="button" class="secondary" data-health-action="azure" data-health-index="${index}">Open VM in Azure</button>
@@ -3809,11 +3455,11 @@ function healthBuildVmCard(result, index) {
         <details><summary>Performance</summary><div class="health-details-body"><div class="health-metric-grid"><div class="health-metric-box"><span>CPU average</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.average))}</strong></div><div class="health-metric-box"><span>CPU maximum</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</strong></div><div class="health-metric-box"><span>Metric latest</span><strong>${escapeHtml(healthFormatDateTime(view.platform.cpu.latestUtc))}</strong></div><div class="health-metric-box"><span>Network in</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Network out</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Period</span><strong>${escapeHtml(`${result?.periodMinutes || ""} min`)}</strong></div></div>${freshnessTable}</div></details>
         <details><summary>Storage &amp; disk performance</summary><div class="health-details-body"><h4 class="health-section-heading">Azure managed disks</h4>${managedDiskTable}<h4 class="health-section-heading">Guest logical disks</h4>${guestDiskTable}<h4 class="health-section-heading">Platform disk performance</h4>${diskPerfTable}</div></details>
         <details><summary>Network &amp; effective configuration</summary><div class="health-details-body"><h4 class="health-section-heading">NIC configuration</h4>${networkTable}<h4 class="health-section-heading">Effective routes</h4>${routesTable}<h4 class="health-section-heading">Effective network security groups</h4>${nsgTable}</div></details>
-        <details data-health-section="alerts"><summary>Azure alerts &amp; recent changes</summary><div class="health-details-body"><h4 class="health-section-heading">Active fired alerts</h4>${alertTable}<h4 class="health-section-heading">Azure Activity Log - last 24 hours</h4>${activityTable}</div></details>
+        <details><summary>Azure alerts &amp; recent changes</summary><div class="health-details-body"><h4 class="health-section-heading">Active fired alerts</h4>${alertTable}<h4 class="health-section-heading">Azure Activity Log - last 24 hours</h4>${activityTable}</div></details>
         <details><summary>Resource Health history</summary><div class="health-details-body"><p class="field-help">Current summary: <strong>${escapeHtml(rh.summary || rh.title || view.resourceHealth)}</strong> • Context: <strong>${escapeHtml(rh.context || "Unknown")}</strong> • Reason: <strong>${escapeHtml(rh.reasonType || rh.category || "Unknown")}</strong> • Reported: <strong>${escapeHtml(healthFormatDateTime(rh.reportedTime))}</strong>${rh.resolutionETA ? ` • Resolution ETA: <strong>${escapeHtml(healthFormatDateTime(rh.resolutionETA))}</strong>` : ""}</p><h4 class="health-section-heading">Azure recommended actions</h4>${rhRecommendedHtml}<h4 class="health-section-heading">Availability history</h4>${resourceHistoryTable}</div></details>
         <details><summary>VM extensions</summary><div class="health-details-body">${extensionTable}</div></details>
         <details><summary>Monitoring / Regional LAW / AMA / DCR</summary><div class="health-details-body"><p class="field-help">Effective LAW: <strong>${escapeHtml(monitoring.regionalLawName)}</strong>${monitoring.regionalLawFallbackUsed ? ` • <strong>Fallback used</strong>: ${escapeHtml(monitoring.regionalLawPrimaryName || "central-law-weu-law")} → ${escapeHtml(monitoring.regionalLawFallbackName || monitoring.regionalLawName)}` : ` • Primary LAW used: <strong>${escapeHtml(monitoring.regionalLawPrimaryName || monitoring.regionalLawName)}</strong>`}${monitoring.regionalLawLocation ? ` • LAW region: <strong>${escapeHtml(monitoring.regionalLawLocation)}</strong>` : ""}${monitoring.regionalLawResourceGroup ? ` • LAW RG: <strong>${escapeHtml(monitoring.regionalLawResourceGroup)}</strong>` : ""} • LAW lookup: <strong>${escapeHtml(monitoring.regionalLawLookupStatus)}</strong> • Workspace ID: <strong>${escapeHtml(monitoring.regionalLawWorkspaceId || "Unknown")}</strong> • AMA: <strong>${escapeHtml(monitoring.amaInstalled ? monitoring.amaProvisioningState : "Not detected")}</strong> • DCR associations: <strong>${escapeHtml(monitoring.dcrCount)}</strong> • VM Insights data: <strong>${escapeHtml(monitoring.vmInsightsDataAvailable ? "Available" : "Unknown")}</strong> • Last heartbeat: <strong>${escapeHtml(healthFormatDateTime(monitoring.heartbeatUtc))}</strong> (${escapeHtml(healthAgeText(monitoring.heartbeatUtc))})</p>${monitoring.regionalLawFallbackUsed ? `<p class="health-inline-note"><strong>Last-resort LAW fallback was used.</strong> No Heartbeat, InsightsMetrics or Perf rows matching this VM were returned from the primary regional LAW.</p>` : ""}<h4 class="health-section-heading">LAW query diagnostics</h4><div class="health-table-wrap"><table class="health-table"><thead><tr><th>Source</th><th>Query</th><th>Logic App status</th><th>HTTP</th><th>Error</th></tr></thead><tbody>${monitoring.regionalLawFallbackUsed ? `<tr><td>Primary</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceHttpStatus || "-")}</td><td>-</td></tr>` : ""}<tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatErrorCode || monitoring.lawDiagnostics?.heartbeatErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestErrorCode || monitoring.lawDiagnostics?.guestErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceErrorCode || monitoring.lawDiagnostics?.performanceErrorMessage || "-")}</td></tr></tbody></table></div><h4 class="health-section-heading">DCR associations</h4>${dcrTable}<h4 class="health-section-heading">LAW performance counters (when collected)</h4>${lawPerformanceTable}</div></details>
-        <details data-health-section="patching"><summary>Backup &amp; patching</summary><div class="health-details-body"><h4 class="health-section-heading">Azure Backup</h4>${backupTable}<h4 class="health-section-heading">Update Manager</h4><p class="field-help">Assessment: <strong>${escapeHtml(healthFormatDateTime(patch.lastAssessmentUtc))}</strong> (${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}) • Reboot pending: <strong>${escapeHtml(patch.rebootPending === null ? "Unknown" : String(patch.rebootPending))}</strong></p>${patchTable}</div></details>
+        <details><summary>Backup &amp; patching</summary><div class="health-details-body"><h4 class="health-section-heading">Azure Backup</h4>${backupTable}<h4 class="health-section-heading">Update Manager</h4><p class="field-help">Assessment: <strong>${escapeHtml(healthFormatDateTime(patch.lastAssessmentUtc))}</strong> (${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}) • Reboot pending: <strong>${escapeHtml(patch.rebootPending === null ? "Unknown" : String(patch.rebootPending))}</strong></p>${patchTable}</div></details>
         <details><summary>Boot diagnostics</summary><div class="health-details-body"><p class="field-help">Boot diagnostics configuration: <strong>${escapeHtml(vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown")}</strong>.</p><p class="health-inline-note">For security, this report does not return temporary screenshot/serial-log SAS URLs. Use <strong>Open VM in Azure</strong> and the Boot diagnostics blade when detailed boot artifacts are needed.</p></div></details>
         <details><summary>Recommendations</summary><div class="health-details-body"><ol class="health-recommendations">${view.recommendations.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ol></div></details>
       </div>
@@ -3852,8 +3498,6 @@ function renderHealthStatus(result) {
         const old = button.textContent; button.textContent = "Copied"; window.setTimeout(() => { button.textContent = old; }, 1500);
       } else if (action === "json") {
         healthDownloadFile(`vm-health-${String(item.hostname || "vm").toLowerCase()}.json`, JSON.stringify(item, null, 2), "application/json");
-      } else if (action === "pdf") {
-        healthDownloadPdfReport(item);
       } else if (action === "csv") {
         const v = deriveVmHealth(item);
         const rows = [
@@ -3867,34 +3511,6 @@ function renderHealthStatus(result) {
       } else if (action === "azure") {
         window.open(healthVmPortalUrl(item), "_blank", "noopener,noreferrer");
       }
-    });
-  });
-
-  healthResultArea.querySelectorAll("[data-health-detail]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const card = button.closest(".health-vm-card");
-      if (!card) return;
-
-      const section = button.dataset.healthDetail;
-      const detail = card.querySelector(`details[data-health-section="${section}"]`);
-      if (!detail) return;
-
-      detail.open = true;
-      detail.classList.remove("health-detail-click-focus");
-      void detail.offsetWidth;
-      detail.classList.add("health-detail-click-focus");
-
-      const summary = detail.querySelector("summary");
-      if (summary) {
-        summary.scrollIntoView({
-          behavior: "smooth",
-          block: "center"
-        });
-      }
-
-      window.setTimeout(() => {
-        detail.classList.remove("health-detail-click-focus");
-      }, 1800);
     });
   });
 }
