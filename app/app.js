@@ -2862,26 +2862,54 @@ function healthReadGuest(result) {
   const memoryPercentRow = rows.find((row) => row.Namespace === "Memory" && row.Name === "AvailablePercent");
   let availableMemoryMb = healthFiniteNumber(memoryRow?.Value);
   let availableMemoryPercent = healthFiniteNumber(memoryPercentRow?.Value);
+
   if (availableMemoryPercent === null && memoryRow) {
     const tags = healthParseJson(memoryRow.Tags);
     const totalMemoryMb = healthFiniteNumber(tags["vm.azm.ms/memorySizeMB"]);
-    if (availableMemoryMb !== null && totalMemoryMb !== null && totalMemoryMb > 0) availableMemoryPercent = (availableMemoryMb / totalMemoryMb) * 100;
+    if (availableMemoryMb !== null && totalMemoryMb !== null && totalMemoryMb > 0) {
+      availableMemoryPercent = (availableMemoryMb / totalMemoryMb) * 100;
+    }
   }
 
   const disksByInstance = new Map();
   for (const row of rows) {
     if (row.Namespace !== "LogicalDisk") continue;
+
     const instance = String(row.Instance || "Unknown");
-    const current = disksByInstance.get(instance) || { instance, freePercent: null, freeMb: null, timeGenerated: row.TimeGenerated || null };
+    const current = disksByInstance.get(instance) || {
+      instance,
+      freePercent: null,
+      freeMb: null,
+      timeGenerated: row.TimeGenerated || null,
+      source: String(row.Source || ""),
+      isOverallTotal: instance === "_Total"
+    };
+
     if (row.Name === "FreeSpacePercentage") current.freePercent = healthFiniteNumber(row.Value);
     if (row.Name === "FreeSpaceMB") current.freeMb = healthFiniteNumber(row.Value);
     if (row.TimeGenerated) current.timeGenerated = row.TimeGenerated;
+    if (row.Source) current.source = String(row.Source);
+    current.isOverallTotal = instance === "_Total";
+
     disksByInstance.set(instance, current);
   }
-  const disks = [...disksByInstance.values()];
-  const freePercents = disks.map((disk) => disk.freePercent).filter((value) => value !== null);
-  const freeMbs = disks.map((disk) => disk.freeMb).filter((value) => value !== null);
-  const latestGuestUtc = rows.map((row) => row.TimeGenerated).filter(Boolean).sort((a,b) => new Date(b)-new Date(a))[0] || null;
+
+  const disks = [...disksByInstance.values()].sort((a, b) => {
+    if (a.isOverallTotal && !b.isOverallTotal) return 1;
+    if (!a.isOverallTotal && b.isOverallTotal) return -1;
+    return String(a.instance).localeCompare(String(b.instance), undefined, { numeric: true, sensitivity: "base" });
+  });
+
+  const individualDisks = disks.filter((disk) => !disk.isOverallTotal);
+  const totalDisk = disks.find((disk) => disk.isOverallTotal) || null;
+  const preferredDisks = individualDisks.length ? individualDisks : (totalDisk ? [totalDisk] : []);
+
+  const freePercents = preferredDisks.map((disk) => disk.freePercent).filter((value) => value !== null);
+  const freeMbs = preferredDisks.map((disk) => disk.freeMb).filter((value) => value !== null);
+  const latestGuestUtc = rows
+    .map((row) => row.TimeGenerated)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b) - new Date(a))[0] || null;
 
   return {
     availableMemoryMb,
@@ -2889,6 +2917,10 @@ function healthReadGuest(result) {
     lowestDiskFreePercent: freePercents.length ? Math.min(...freePercents) : null,
     lowestDiskFreeMb: freeMbs.length ? Math.min(...freeMbs) : null,
     disks,
+    individualDisks,
+    totalDisk,
+    perDriveDataAvailable: individualDisks.length > 0,
+    onlyOverallDiskAvailable: individualDisks.length === 0 && !!totalDisk,
     heartbeatUtc: null,
     latestGuestUtc,
     dataAvailable: rows.length > 0
@@ -3197,7 +3229,7 @@ function healthCopyText(result) {
   const v = deriveVmHealth(result);
   const vm = result?.vm || {};
   return [
-    `VM Health Diagnostic V2.4`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
+    `VM Health Diagnostic V2.5`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
     `Power: ${v.powerState}`, `Resource Health: ${v.resourceHealth}`, `Active alerts: ${v.alerts.length}`,
     `CPU avg/max: ${healthIsRunning(v.powerState) ? `${healthFormatPercent(v.platform.cpu.average)} / ${healthFormatPercent(v.platform.cpu.maximum)}` : "N/A - VM not running"}`,
     `Memory available: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A - VM not running"}`,
@@ -3231,11 +3263,29 @@ function healthBuildVmCard(result, index) {
   const memoryDisplay = !running ? "N/A – VM not running" : guest.availableMemoryPercent !== null ? healthFormatPercent(guest.availableMemoryPercent) : guest.availableMemoryMb !== null ? `${healthFormatNumber(guest.availableMemoryMb, 0)} MB` : "Unknown";
   const diskDisplay = !running ? "N/A – VM not running" : guest.lowestDiskFreePercent !== null ? healthFormatPercent(guest.lowestDiskFreePercent) : guest.lowestDiskFreeMb !== null ? `${healthFormatNumber(guest.lowestDiskFreeMb, 0)} MB` : "Unknown";
 
+  const diskSummaryList = guest.individualDisks.length
+    ? guest.individualDisks.map((disk) => {
+        const freeValue = disk.freePercent !== null
+          ? `${disk.freePercent.toFixed(1)}%`
+          : disk.freeMb !== null
+            ? `${healthFormatNumber(disk.freeMb / 1024, 1)} GB`
+            : "Unknown";
+        return `${disk.instance}: ${freeValue}`;
+      }).join(" • ")
+    : guest.totalDisk
+      ? `Overall (_Total): ${guest.totalDisk.freePercent !== null ? `${guest.totalDisk.freePercent.toFixed(1)}%` : guest.totalDisk.freeMb !== null ? `${healthFormatNumber(guest.totalDisk.freeMb / 1024, 1)} GB` : "Unknown"}`
+      : "No logical-disk data";
+
+  const diskCardLabel = guest.perDriveDataAvailable ? "Disk free by drive" : "Disk free";
+
   const findingsHtml = view.findings.length ? `<ul>${view.findings.map((finding) => `<li class="health-finding-${finding.severity.toLowerCase()}"><strong>${escapeHtml(finding.severity)}:</strong> ${escapeHtml(finding.message)}</li>`).join("")}</ul>` : '<div class="health-empty">No warning or critical findings were identified by the configured V2 rules.</div>';
 
   const guestDiskTable = healthBuildMiniTable([
-    { label: "Drive / mount", value: (r) => r.instance }, { label: "Free %", value: (r) => r.freePercent === null ? "Unknown" : `${r.freePercent.toFixed(1)}%` },
-    { label: "Free MB", value: (r) => r.freeMb === null ? "Unknown" : r.freeMb.toFixed(0) }, { label: "Last sample", value: (r) => healthFormatDateTime(r.timeGenerated) }
+    { label: "Drive / mount", value: (r) => r.instance },
+    { label: "Free %", value: (r) => r.freePercent === null ? "Unknown" : `${r.freePercent.toFixed(1)}%` },
+    { label: "Free GB", value: (r) => r.freeMb === null ? "Unknown" : healthFormatNumber(r.freeMb / 1024, 1) },
+    { label: "Scope", value: (r) => r.isOverallTotal ? "Overall (_Total)" : "Individual drive" },
+    { label: "Last sample", value: (r) => healthFormatDateTime(r.timeGenerated) }
   ], guest.disks);
 
   const managedDiskTable = healthBuildMiniTable([
@@ -3341,7 +3391,7 @@ function healthBuildVmCard(result, index) {
         <div class="health-chip"><span class="health-chip-label">Active alerts</span><span class="health-chip-value">${escapeHtml(view.alerts.length)}</span></div>
         <div class="health-chip"><span class="health-chip-label">CPU avg / max</span><span class="health-chip-value">${escapeHtml(runtimeMetric(view.platform.cpu.average))} / ${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</span></div>
         <div class="health-chip"><span class="health-chip-label">Memory available</span><span class="health-chip-value">${escapeHtml(memoryDisplay)}</span></div>
-        <div class="health-chip"><span class="health-chip-label">Lowest disk free</span><span class="health-chip-value">${escapeHtml(diskDisplay)}</span></div>
+        <div class="health-chip"><span class="health-chip-label">${escapeHtml(diskCardLabel)}</span><span class="health-chip-value">${escapeHtml(diskDisplay)}</span><span class="health-kpi-note">${escapeHtml(diskSummaryList)}</span></div>
         <div class="health-chip"><span class="health-chip-label">Network in / out</span><span class="health-chip-value">${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")} / ${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</span></div>
         <div class="health-chip"><span class="health-chip-label">Azure Backup</span><span class="health-chip-value">${escapeHtml(backup.protected)}</span><span class="health-kpi-note">${escapeHtml(backup.lastBackupStatus)} • ${escapeHtml(healthAgeText(backup.lastBackupTime))}</span></div>
         <div class="health-chip"><span class="health-chip-label">Patch assessment</span><span class="health-chip-value">${escapeHtml(patchDisplay)}</span><span class="health-kpi-note">${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}</span></div>
@@ -3358,7 +3408,13 @@ function healthBuildVmCard(result, index) {
       </div>
 
       <div class="health-findings"><h4>Findings</h4>${findingsHtml}</div>
-      ${!running ? '<div class="health-note">Performance, guest memory and logical-disk utilization are shown as N/A while the VM is not running. Zero is not used as a substitute for unavailable telemetry.</div>' : !guest.dataAvailable ? '<div class="health-note">Guest memory and logical-disk values are Unknown because neither InsightsMetrics nor the required Perf counters were returned from the effective Log Analytics workspace.</div>' : ""}
+      ${!running
+        ? '<div class="health-note">Performance, guest memory and logical-disk utilization are shown as N/A while the VM is not running. Zero is not used as a substitute for unavailable telemetry.</div>'
+        : !guest.dataAvailable
+          ? '<div class="health-note">Guest memory and logical-disk values are Unknown because neither InsightsMetrics nor the required Perf counters were returned from the effective Log Analytics workspace.</div>'
+          : guest.onlyOverallDiskAvailable
+            ? '<div class="health-note"><strong>Disk scope:</strong> LAW currently returns only LogicalDisk(_Total). The overall free-space value is shown, but individual drive letters require per-drive counters such as \\LogicalDisk(*)\\% Free Space to be collected by the VM DCR.</div>'
+            : ""}
 
       <div class="health-details">
         <details><summary>VM configuration &amp; runtime</summary><div class="health-details-body">${healthBuildConfiguration(result, view)}</div></details>
