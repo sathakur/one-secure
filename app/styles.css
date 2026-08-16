@@ -219,3 +219,17 @@
     white-space: normal;
   }
 }
+
+
+/* V2.6 PDF-only enhancement */
+.health-action-bar [data-health-action="pdf"] {
+  border-color: #9dbbd3;
+  background: #f7fbff;
+  color: #0f5f9a;
+  font-weight: 700;
+}
+
+.health-action-bar [data-health-action="pdf"]:hover {
+  border-color: #6e9fc2;
+  background: #edf6fd;
+}

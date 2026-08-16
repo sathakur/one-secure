@@ -3246,6 +3246,343 @@ function healthDownloadFile(filename, content, type) {
   const a = document.createElement("a"); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
+
+// V2.6 PDF-only enhancement: creates one complete print-ready report for the VM.
+// All diagnostic accordions are expanded in the report, while the live portal is unchanged.
+function healthDownloadPdfReport(result) {
+  const hostname = String(result?.hostname || result?.vm?.VMName || "vm").trim() || "vm";
+  const safeHostname = hostname.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
+  const generatedUtc = new Date();
+  const generatedDisplay = generatedUtc.toLocaleString();
+  const fileDate = generatedUtc.toISOString().replace(/[:]/g, "-").replace(/\.\d{3}Z$/, "Z");
+
+  if (!healthResultArea) {
+    alert("VM health result is not available for PDF export.");
+    return;
+  }
+
+  const reportClone = healthResultArea.cloneNode(true);
+
+  // Export the complete diagnostic, not only currently expanded sections.
+  reportClone.querySelectorAll("details").forEach((detail) => {
+    detail.setAttribute("open", "");
+    detail.open = true;
+  });
+
+  // Remove portal-only controls from the PDF copy.
+  reportClone.querySelectorAll(".health-action-bar").forEach((node) => node.remove());
+  reportClone.querySelectorAll("button").forEach((node) => node.remove());
+
+  const printableHtml = reportClone.innerHTML;
+  const reportWindow = window.open("", "_blank");
+
+  if (!reportWindow) {
+    alert("The browser blocked the PDF report window. Allow pop-ups for this portal and try again.");
+    return;
+  }
+
+  const cssUrl = new URL("/styles.css", window.location.origin).href;
+  const reportTitle = `vm-health-${safeHostname}-${fileDate}`;
+
+  reportWindow.document.open();
+  reportWindow.document.write(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${escapeHtml(reportTitle)}</title>
+  <link rel="stylesheet" href="${escapeHtml(cssUrl)}">
+  <style>
+    @page {
+      size: A4 landscape;
+      margin: 10mm;
+    }
+
+    html,
+    body {
+      margin: 0 !important;
+      padding: 0 !important;
+      background: #ffffff !important;
+      color: #102a43 !important;
+      font-family: Arial, Helvetica, sans-serif !important;
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
+
+    body {
+      width: 100% !important;
+      max-width: none !important;
+    }
+
+    .health-pdf-shell {
+      width: 100% !important;
+      max-width: none !important;
+      margin: 0 !important;
+      padding: 0 !important;
+    }
+
+    .health-pdf-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 20px;
+      padding: 0 0 8px;
+      margin-bottom: 10px;
+      border-bottom: 2px solid #0f6cbd;
+    }
+
+    .health-pdf-header h1 {
+      margin: 0;
+      font-size: 18pt;
+      color: #0b2239;
+    }
+
+    .health-pdf-header p {
+      margin: 3px 0 0;
+      color: #526b80;
+      font-size: 8.5pt;
+    }
+
+    .health-pdf-meta {
+      text-align: right;
+      font-size: 8pt;
+      color: #526b80;
+      white-space: nowrap;
+    }
+
+    #healthResultArea,
+    .health-results,
+    .health-result-area {
+      width: 100% !important;
+      max-width: none !important;
+      margin: 0 !important;
+    }
+
+    .health-action-bar,
+    button,
+    .secondary {
+      display: none !important;
+    }
+
+    .health-vm-card,
+    .health-status-banner,
+    .health-overview-grid,
+    .health-findings,
+    .health-note {
+      box-shadow: none !important;
+    }
+
+    .health-vm-card {
+      border: 1px solid #cddbe7 !important;
+      margin: 0 0 10px !important;
+      break-inside: auto;
+    }
+
+    .health-chip-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+      gap: 6px !important;
+    }
+
+    .health-chip {
+      min-height: 0 !important;
+      padding: 8px 9px !important;
+      border: 1px solid #d6e2ec !important;
+      box-shadow: none !important;
+      transform: none !important;
+      background: #ffffff !important;
+    }
+
+    .health-chip-label {
+      font-size: 7.5pt !important;
+    }
+
+    .health-chip-value {
+      font-size: 10.5pt !important;
+    }
+
+    .health-kpi-note,
+    .health-disk-system-note,
+    .health-disk-lowest {
+      font-size: 7.5pt !important;
+    }
+
+    .health-disk-pill {
+      font-size: 7.5pt !important;
+      padding: 2px 6px !important;
+    }
+
+    .health-findings {
+      break-inside: avoid-page;
+    }
+
+    .health-findings h4 {
+      margin-top: 0 !important;
+    }
+
+    .health-findings li {
+      font-size: 8pt !important;
+      line-height: 1.35 !important;
+      margin-bottom: 2px !important;
+    }
+
+    .health-details details {
+      display: block !important;
+      border-top: 1px solid #d6e2ec !important;
+      break-inside: auto !important;
+    }
+
+    .health-details details[open] > * {
+      display: block !important;
+    }
+
+    .health-details summary {
+      display: block !important;
+      padding: 7px 9px !important;
+      font-size: 9pt !important;
+      font-weight: 700 !important;
+      color: #0b2239 !important;
+      background: #f5f9fc !important;
+      break-after: avoid-page;
+      list-style: none !important;
+    }
+
+    .health-details summary::-webkit-details-marker {
+      display: none !important;
+    }
+
+    .health-details-body {
+      display: block !important;
+      padding: 8px 9px !important;
+    }
+
+    .health-section-heading {
+      margin: 8px 0 5px !important;
+      font-size: 8.5pt !important;
+      break-after: avoid-page;
+    }
+
+    .health-table-wrap {
+      overflow: visible !important;
+      width: 100% !important;
+      margin-bottom: 7px !important;
+    }
+
+    .health-table-wrap table,
+    .health-mini-table {
+      width: 100% !important;
+      border-collapse: collapse !important;
+      table-layout: auto !important;
+      font-size: 7.2pt !important;
+    }
+
+    .health-table-wrap thead,
+    .health-mini-table thead {
+      display: table-header-group !important;
+    }
+
+    .health-table-wrap tr,
+    .health-mini-table tr {
+      break-inside: avoid !important;
+    }
+
+    .health-table-wrap th,
+    .health-table-wrap td,
+    .health-mini-table th,
+    .health-mini-table td {
+      padding: 3px 4px !important;
+      border: 1px solid #dbe5ed !important;
+      vertical-align: top !important;
+      white-space: normal !important;
+      overflow-wrap: anywhere !important;
+    }
+
+    .health-metric-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+      gap: 5px !important;
+    }
+
+    .health-metric-box {
+      padding: 6px 7px !important;
+      min-height: 0 !important;
+      box-shadow: none !important;
+    }
+
+    .health-metric-box span {
+      font-size: 7pt !important;
+    }
+
+    .health-metric-box strong {
+      font-size: 8.5pt !important;
+    }
+
+    .health-status-pill {
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
+
+    .health-request-meta,
+    .health-vm-subtitle,
+    .field-help,
+    .health-empty,
+    .health-note {
+      font-size: 7.8pt !important;
+      line-height: 1.35 !important;
+    }
+
+    a {
+      color: #0f6cbd !important;
+      text-decoration: none !important;
+    }
+
+    @media print {
+      .health-pdf-header,
+      .health-overview-grid,
+      .health-vm-header {
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="health-pdf-shell">
+    <header class="health-pdf-header">
+      <div>
+        <h1>Azure VM Health Diagnostic Report</h1>
+        <p>Complete diagnostic output for ${escapeHtml(hostname)}</p>
+      </div>
+      <div class="health-pdf-meta">
+        <div><strong>Generated:</strong> ${escapeHtml(generatedDisplay)}</div>
+        <div><strong>Portal:</strong> VM Health Diagnostic V2.6</div>
+      </div>
+    </header>
+
+    <section id="healthResultArea">
+      ${printableHtml}
+    </section>
+  </main>
+</body>
+</html>`);
+  reportWindow.document.close();
+
+  const triggerPrint = () => {
+    try {
+      reportWindow.focus();
+      reportWindow.print();
+    } catch (error) {
+      console.error("Unable to open PDF print dialog.", error);
+      alert("The PDF report was prepared, but the browser could not open the print dialog.");
+    }
+  };
+
+  if (reportWindow.document.readyState === "complete") {
+    window.setTimeout(triggerPrint, 600);
+  } else {
+    reportWindow.addEventListener("load", () => {
+      window.setTimeout(triggerPrint, 600);
+    }, { once: true });
+  }
+}
+
 function healthDiskFreeStatus(percent) {
   const value = healthFiniteNumber(percent);
   if (value === null) return "unknown";
@@ -3436,6 +3773,7 @@ function healthBuildVmCard(result, index) {
 
       <div class="health-action-bar">
         <button type="button" class="secondary" data-health-action="copy" data-health-index="${index}">Copy for incident</button>
+        <button type="button" class="secondary" data-health-action="pdf" data-health-index="${index}">Download PDF</button>
         <button type="button" class="secondary" data-health-action="json" data-health-index="${index}">Download JSON</button>
         <button type="button" class="secondary" data-health-action="csv" data-health-index="${index}">Export CSV</button>
         <button type="button" class="secondary" data-health-action="azure" data-health-index="${index}">Open VM in Azure</button>
@@ -3496,6 +3834,8 @@ function renderHealthStatus(result) {
       if (action === "copy") {
         await navigator.clipboard.writeText(healthCopyText(item));
         const old = button.textContent; button.textContent = "Copied"; window.setTimeout(() => { button.textContent = old; }, 1500);
+      } else if (action === "pdf") {
+        healthDownloadPdfReport(item);
       } else if (action === "json") {
         healthDownloadFile(`vm-health-${String(item.hostname || "vm").toLowerCase()}.json`, JSON.stringify(item, null, 2), "application/json");
       } else if (action === "csv") {
