@@ -3569,7 +3569,7 @@ function deriveVmHealth(result) {
   if (spikes.ram.spikeCount1h > 0) recommendations.push("Review the RAM 24-hour trend around the latest spike and correlate it with process/workload growth and paging pressure.");
   if ((spikes.cpu.spikeCount1h > 0 || spikes.ram.spikeCount1h > 0) && !processConsumers.available) recommendations.push("Enable the approved Process(*) performance counters in the VM DCR so the portal can identify the top CPU and memory-consuming processes during investigations.");
   if (processConsumers.available && !processHistory.available) recommendations.push("Historical process analysis is unavailable. Confirm the Process(*) counters have been collecting long enough and that the 24-hour Perf query succeeds in the effective Log Analytics workspace.");
-  if (!guestIdentity.exact && String(result?.vm?.OSType || "").toLowerCase() === "windows" && running) recommendations.push("Exact domain/workgroup information needs the narrow VM Run Command permission. Assign the supplied Guest Identity Query Operator role if exact guest identity is required.");
+  if (!guestIdentity.exact && String(result?.vm?.OSType || "").toLowerCase() === "windows" && running) recommendations.push("Exact Windows domain information needs the narrow VM Run Command permission. Assign the supplied Guest Identity Query Operator role if exact Domain information is required.");
   if (windowsEventSummary.criticalUnique24h > 0) recommendations.push("Review the unique Critical Windows System/Application event types, starting with the highest-occurrence and most recently seen Event ID/source.");
   if (patch.criticalSecurityCount > 0) recommendations.push("Review pending Critical/Security patches in Azure Update Manager and schedule remediation through the approved patch process.");
   if (backup.protected.toLowerCase() !== "protected" || /unhealthy|failed/i.test(backup.lastBackupStatus)) recommendations.push("Review Azure Backup protection and the latest backup job before relying on recovery-point availability.");
@@ -3602,27 +3602,46 @@ function healthBuildMiniTable(headers, rows) {
 function healthBuildConfiguration(result, view) {
   const vm = result?.vm || {};
   const hardware = result?.hardware || {};
+  const instanceView = result?.instanceView || {};
   const vCpuCount = healthFiniteNumber(hardware.vCpuCount);
   const memoryMb = healthFiniteNumber(hardware.memoryMB);
   const memoryGb = memoryMb === null ? null : memoryMb / 1024;
   const guestIdentity = view?.guestIdentity || healthReadGuestIdentity(result);
+
+  const osName = String(
+    instanceView?.osName ||
+    vm?.OSName ||
+    ""
+  ).trim() || "Unknown";
+
+  const osVersion = String(
+    instanceView?.osVersion ||
+    vm?.OSVersion ||
+    ""
+  ).trim() || "Unknown";
+
   const rows = [
-    ["Azure VM name", vm.VMName || "Unknown"], ["OS hostname", vm.ComputerName || vm.Hostname || result?.hostname || "Unknown"],
-    ["Subscription", vm.SubscriptionName || vm.SubscriptionId || "Unknown"], ["Resource group", vm.ResourceGroup || "Unknown"],
-    ["Region", vm.Location || "Unknown"], ["VM size", vm.VMSize || "Unknown"],
+    ["Azure VM name", vm.VMName || "Unknown"],
+    ["OS hostname", instanceView?.computerName || vm.ComputerName || vm.Hostname || result?.hostname || "Unknown"],
+    ["Subscription", vm.SubscriptionName || vm.SubscriptionId || "Unknown"],
+    ["Resource group", vm.ResourceGroup || "Unknown"],
+    ["Region", vm.Location || "Unknown"],
+    ["VM size", vm.VMSize || "Unknown"],
     ["vCPUs", vCpuCount === null ? "Unknown" : healthFormatNumber(vCpuCount, 0)],
     ["RAM", memoryGb === null ? "Unknown" : `${healthFormatNumber(memoryGb, memoryGb % 1 === 0 ? 0 : 1)} GB`],
     ["OS type", vm.OSType || "Unknown"],
-    ["Domain / workgroup", guestIdentity.membership || "Unknown"],
+    ["OS name", osName],
+    ["OS version", osVersion],
     ["Domain", guestIdentity.domain || "Unknown"],
-    ["DNS suffix", guestIdentity.dnsSuffix || "Unknown"],
-    ["Workgroup", guestIdentity.workgroup || "Unknown"],
-    ["FQDN", guestIdentity.fqdn || "Unknown"],
-    ["Guest identity source", guestIdentity.source || "Unknown"],
-    ["Security type", vm.SecurityType || "Standard / not reported"], ["Managed identity", vm.IdentityType || "None / not reported"],
+    ["Security type", vm.SecurityType || "Standard / not reported"],
+    ["Managed identity", vm.IdentityType || "None / not reported"],
     ["Boot diagnostics", vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown"],
-    ["Power state", view.powerState], ["Provisioning state", view.provisioningState], ["VM Agent", view.agentStatus], ["Resource ID", vm.ResourceId || "Unknown"]
+    ["Power state", view.powerState],
+    ["Provisioning state", view.provisioningState],
+    ["VM Agent", view.agentStatus],
+    ["Resource ID", vm.ResourceId || "Unknown"]
   ];
+
   return `<div class="table-wrap"><table class="health-mini-table"><tbody>${rows.map(([label, value]) => `<tr><th>${escapeHtml(label)}</th><td>${escapeHtml(value)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
@@ -3639,12 +3658,14 @@ function healthCopyText(result) {
   const memoryMb = healthFiniteNumber(hardware.memoryMB);
   const memoryGb = memoryMb === null ? null : memoryMb / 1024;
   return [
-    `VM Health Diagnostic V2.7.3`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
+    `VM Health Diagnostic V2.7.3.2`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
     `Power: ${v.powerState}`, `Resource Health: ${v.resourceHealth}`, `Active alerts: ${v.alerts.length}`,
     `CPU avg/max: ${healthIsRunning(v.powerState) ? `${healthFormatPercent(v.platform.cpu.average)} / ${healthFormatPercent(v.platform.cpu.maximum)}` : "N/A - VM not running"}`,
     `vCPUs: ${vCpuCount === null ? "Unknown" : healthFormatNumber(vCpuCount, 0)}`,
     `RAM: ${memoryGb === null ? "Unknown" : `${healthFormatNumber(memoryGb, memoryGb % 1 === 0 ? 0 : 1)} GB`}`,
-    `Domain/workgroup: ${v.guestIdentity.membership}; domain=${v.guestIdentity.domain}; workgroup=${v.guestIdentity.workgroup}`,
+    `OS name: ${String(result?.instanceView?.osName || vm?.OSName || "Unknown")}`,
+    `OS version: ${String(result?.instanceView?.osVersion || vm?.OSVersion || "Unknown")}`,
+    `Domain: ${v.guestIdentity.domain || "Unknown"}`,
     `CPU spikes: peak1h=${healthFormatPercent(v.spikes.cpu.peak1h)}; peak24h=${healthFormatPercent(v.spikes.cpu.peak24h)}; spikes24h=${v.spikes.cpu.spikeCount24h}; last=${healthFormatDateTime(v.spikes.cpu.lastSpike24hUtc)}`,
     `RAM spikes: peak1h=${healthFormatPercent(v.spikes.ram.peak1h)}; peak24h=${healthFormatPercent(v.spikes.ram.peak24h)}; spikes24h=${v.spikes.ram.spikeCount24h}; last=${healthFormatDateTime(v.spikes.ram.lastSpike24hUtc)}`,
     `Top CPU processes: ${v.processConsumers.cpu.length ? v.processConsumers.cpu.map((p) => `${p.process}${p.pid !== null ? `(${Math.trunc(p.pid)})` : ""} ${healthFormatPercent(p.current)}`).join("; ") : "Unknown"}`,
@@ -3971,7 +3992,7 @@ function healthDownloadPdfReport(result) {
       </div>
       <div class="health-pdf-meta">
         <div><strong>Generated:</strong> ${escapeHtml(generatedDisplay)}</div>
-        <div><strong>Portal:</strong> VM Health Diagnostic V2.7.3</div>
+        <div><strong>Portal:</strong> VM Health Diagnostic V2.7.3.2</div>
       </div>
     </header>
 
@@ -4081,7 +4102,7 @@ function healthBuildVmCard(result, index) {
     ? `<span class="health-disk-system-note">${escapeHtml(`${systemVolumeDisks.length} system volume${systemVolumeDisks.length === 1 ? "" : "s"} available in details`)}</span>`
     : "";
 
-  const findingsHtml = view.findings.length ? `<ul>${view.findings.map((finding) => `<li class="health-finding-${finding.severity.toLowerCase()}"><strong>${escapeHtml(finding.severity)}:</strong> ${escapeHtml(finding.message)}</li>`).join("")}</ul>` : '<div class="health-empty">No warning or critical findings were identified by the configured V2.7.3 rules.</div>';
+  const findingsHtml = view.findings.length ? `<ul>${view.findings.map((finding) => `<li class="health-finding-${finding.severity.toLowerCase()}"><strong>${escapeHtml(finding.severity)}:</strong> ${escapeHtml(finding.message)}</li>`).join("")}</ul>` : '<div class="health-empty">No warning or critical findings were identified by the configured V2.7.3.2 rules.</div>';
 
   const guestDiskTable = healthBuildMiniTable([
     { label: "Drive / mount", value: (r) => r.instance },
@@ -4160,9 +4181,8 @@ function healthBuildVmCard(result, index) {
     ? `<div class="health-consumer-grid"><section class="health-consumer-card"><h5>Historical CPU consumers — 1h / 5h / 24h</h5>${historicalCpuTable}</section><section class="health-consumer-card"><h5>Historical memory consumers — 1h / 5h / 24h</h5>${historicalMemoryTable}</section></div>`
     : '<div class="health-note">Historical process data is unavailable. History starts only after the Process(*) counters are collected into Log Analytics; existing CPU/RAM VM-level metrics cannot reconstruct past per-process usage.</div>';
 
-  const guestIdentityNote = guestIdentity.exact
-    ? `Exact domain/workgroup membership detected from ${guestIdentity.source}.`
-    : `Guest identity is not exact. ${guestIdentity.source}. Standard AMA performance telemetry does not populate VMComputer by itself; exact Windows domain/workgroup is obtained with the optional read-only guest Run Command query.`;
+  // Guest identity diagnostics remain in the JSON result.
+  // The visible VM configuration intentionally displays Domain only.
 
   const managedDiskTable = healthBuildMiniTable([
     { label: "Disk", value: (r) => r.Name || "Unknown" }, { label: "Size GB", value: (r) => r.SizeGB ?? "Unknown" }, { label: "SKU", value: (r) => r.Sku || "Unknown" },
@@ -4313,7 +4333,7 @@ function healthBuildVmCard(result, index) {
             : ""}
 
       <div class="health-details">
-        <details><summary>VM configuration &amp; runtime</summary><div class="health-details-body">${healthBuildConfiguration(result, view)}<p class="health-inline-note">${escapeHtml(guestIdentityNote)}</p></div></details>
+        <details><summary>VM configuration &amp; runtime</summary><div class="health-details-body">${healthBuildConfiguration(result, view)}</div></details>
         <details><summary>Performance</summary><div class="health-details-body"><div class="health-metric-grid"><div class="health-metric-box"><span>CPU average</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.average))}</strong></div><div class="health-metric-box"><span>CPU maximum</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</strong></div><div class="health-metric-box"><span>CPU latest</span><strong>${escapeHtml(spikes.cpu.available ? healthFormatPercent(spikes.cpu.current) : runtimeMetric(view.platform.cpu.latest))}</strong></div><div class="health-metric-box"><span>RAM used latest</span><strong>${escapeHtml(ramUsedDisplay)}</strong></div><div class="health-metric-box"><span>Network in</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Network out</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Period</span><strong>${escapeHtml(`${result?.periodMinutes || ""} min`)}</strong></div></div><h4 class="health-section-heading">CPU / RAM spike analysis</h4><p class="health-inline-note">CPU spike threshold: 85%. RAM-used spike threshold: 90%. CPU uses Azure platform 1-minute metrics; RAM uses the effective Log Analytics workspace (Perf preferred, VM Insights fallback).</p>${spikeTable}${spikeChartsHtml}<h4 class="health-section-heading">Top CPU / memory consumers</h4><p class="health-inline-note">Top 3 process/service-host instances from the last 30 minutes. CPU is normalized by VM vCPU count; memory is private working set. Requires Process(*) counters in the effective DCR.</p>${processConsumersHtml}<h4 class="health-section-heading">Historical process consumption</h4><p class="health-inline-note">Top 3 historical process/service-host consumers for the last 1 hour, 5 hours and 24 hours. Ranking is by peak usage; average and exact peak time are also shown.</p>${processHistoryHtml}<h4 class="health-section-heading">Data freshness</h4>${freshnessTable}</div></details>
         <details><summary>Storage &amp; disk performance</summary><div class="health-details-body"><h4 class="health-section-heading">Azure managed disks</h4>${managedDiskTable}<h4 class="health-section-heading">Guest logical disks</h4>${guestDiskTable}<h4 class="health-section-heading">Platform disk performance</h4>${diskPerfTable}</div></details>
         <details><summary>Network &amp; security configuration</summary><div class="health-details-body"><h4 class="health-section-heading">NIC configuration</h4>${networkTable}<h4 class="health-section-heading">Effective network security groups</h4>${nsgTable}</div></details>
