@@ -200,7 +200,7 @@
         </section>
         <aside class="side-stack">
           <section class="card requirements-panel" aria-labelledby="healthRequirementsHeading">
-            <div class="requirements-heading"><div><span class="requirements-label">What is checked</span><h2 id="healthRequirementsHeading">VM Health Diagnostic V2.7.0</h2></div><span class="requirements-status">Expanded</span></div>
+            <div class="requirements-heading"><div><span class="requirements-label">What is checked</span><h2 id="healthRequirementsHeading">VM Health Diagnostic V2.7.3</h2></div><span class="requirements-status">Expanded</span></div>
             <div class="requirements-grid">
               <article class="requirement-card"><div class="requirement-number">01</div><div><h3>Azure platform</h3><p>VM discovery, configuration, power/provisioning state, current + historical Resource Health, VM Agent, extensions, active Azure alerts and recent Azure changes.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">02</div><div><h3>Performance &amp; storage</h3><p>CPU trend and 24-hour spike analysis, RAM trend and spike analysis, network traffic, disk I/O/latency/utilization, logical-disk free/used/total size, attached Azure managed disks and data freshness.</p></div></article>
@@ -208,7 +208,7 @@
               <article class="requirement-card"><div class="requirement-number">04</div><div><h3>Protection &amp; patching</h3><p>Detailed Azure Backup state, last backup/recovery point, Update Manager assessment, boot diagnostics state, recommendations and export/copy support.</p></div></article>
             </div>
           </section>
-          <section class="policy-card"><div class="policy-title">🛡 Diagnostic-only access</div><p>Regional LAW selection is automatic. West Europe VMs first use <strong>central-law-weu-law</strong>. If no VM telemetry is found there, the diagnostic makes one last-resort attempt against <strong>test-prod-westeu-001-log</strong>. CPU spike history uses Azure platform metrics; guest RAM, logical-disk and VMComputer identity data are read from the effective Log Analytics workspace. Exact Windows workgroup membership is shown as <strong>Unknown</strong> when read-only telemetry cannot prove it. Missing telemetry is never substituted with 0% or Healthy. Health Score is intentionally not used.</p></section>
+          <section class="policy-card"><div class="policy-title">🛡 Diagnostic-only access</div><p>Regional LAW selection is automatic. West Europe VMs first use <strong>central-law-weu-law</strong>. If no VM telemetry is found there, the diagnostic makes one last-resort attempt against <strong>test-prod-westeu-001-log</strong>. CPU spike history uses Azure platform metrics; guest RAM, logical-disk and historical process data are read from the effective Log Analytics workspace. Exact Windows domain/workgroup membership is queried with a narrow, read-only guest PowerShell command when enabled; VMComputer and Heartbeat remain non-invasive fallbacks. Missing telemetry is never substituted with 0% or Healthy. Health Score is intentionally not used.</p></section>
         </aside>
       </div>
       <section id="healthResultArea" class="card result-card health-result-card" hidden aria-live="polite"></section>
@@ -216,6 +216,6 @@
 
     <footer class="portal-footer"><span>Azure VM Operations Portal</span><span>Enterprise self-service • Manual requester identification</span></footer>
   </main>
-  <script src="/app.js?v=20260817-vm-health-v270-guest-identity-cpu-ram-spikes"></script>
+  <script src="/app.js?v=20260817-vm-health-v273-history-domain"></script>
 </body>
 </html>
