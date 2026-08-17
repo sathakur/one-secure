@@ -2831,6 +2831,179 @@ function healthReadLawPerformance(result) {
   return healthRowsFromLawQuery(result?.lawPerformance);
 }
 
+
+function healthMetricPointsFromPayload(payload, metricName) {
+  const metrics = Array.isArray(payload?.value) ? payload.value : [];
+  const metric = metrics.find((item) => String(item?.name?.value || item?.name?.localizedValue || "").toLowerCase() === String(metricName || "").toLowerCase());
+  if (!metric) return [];
+
+  const points = [];
+  for (const ts of (metric.timeseries || [])) {
+    for (const point of (ts?.data || [])) {
+      const value = healthFiniteNumber(point?.maximum) ?? healthFiniteNumber(point?.average) ?? healthFiniteNumber(point?.total);
+      if (value === null || !point?.timeStamp) continue;
+      points.push({ time: point.timeStamp, value, source: "Azure platform metric" });
+    }
+  }
+  return points.sort((a, b) => new Date(a.time) - new Date(b.time));
+}
+
+function healthReadMemoryTrendPoints(result) {
+  const rows = healthRowsFromLawQuery(result?.memoryTrend24h)
+    .map((row) => ({
+      time: row.TimeGenerated || null,
+      value: healthFiniteNumber(row.Value),
+      source: String(row.Source || "Unknown")
+    }))
+    .filter((row) => row.time && row.value !== null);
+
+  const perf = rows.filter((row) => row.source.toLowerCase() === "perf");
+  const insights = rows.filter((row) => row.source.toLowerCase() === "insightsmetrics");
+  const selected = perf.length ? perf : insights.length ? insights : rows;
+  return selected.sort((a, b) => new Date(a.time) - new Date(b.time));
+}
+
+function healthSummarizeSpikeSeries(points, threshold, selectedMinutes = 60) {
+  const valid = (Array.isArray(points) ? points : [])
+    .map((point) => ({ ...point, value: healthFiniteNumber(point.value) }))
+    .filter((point) => point.time && point.value !== null)
+    .sort((a, b) => new Date(a.time) - new Date(b.time));
+
+  const summarizeWindow = (minutes) => {
+    const cutoff = Date.now() - minutes * 60000;
+    const rows = valid.filter((point) => new Date(point.time).getTime() >= cutoff);
+    const values = rows.map((point) => point.value);
+    const spikeRows = rows.filter((point) => point.value >= threshold);
+    return {
+      rows,
+      average: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null,
+      peak: values.length ? Math.max(...values) : null,
+      spikeCount: spikeRows.length,
+      lastSpikeUtc: spikeRows.length ? spikeRows.at(-1).time : null
+    };
+  };
+
+  const oneHour = summarizeWindow(60);
+  const selected = summarizeWindow(selectedMinutes);
+  const day = summarizeWindow(1440);
+  const latest = valid.at(-1) || null;
+
+  return {
+    available: valid.length > 0,
+    source: latest?.source || "Unknown",
+    current: latest?.value ?? null,
+    currentUtc: latest?.time || null,
+    averageSelected: selected.average,
+    peakSelected: selected.peak,
+    spikeCountSelected: selected.spikeCount,
+    lastSpikeSelectedUtc: selected.lastSpikeUtc,
+    average1h: oneHour.average,
+    peak1h: oneHour.peak,
+    spikeCount1h: oneHour.spikeCount,
+    lastSpike1hUtc: oneHour.lastSpikeUtc,
+    average24h: day.average,
+    peak24h: day.peak,
+    spikeCount24h: day.spikeCount,
+    lastSpike24hUtc: day.lastSpikeUtc,
+    threshold,
+    points: valid
+  };
+}
+
+function healthReadPerformanceSpikes(result) {
+  const selectedMinutes = Number(result?.periodMinutes || 60);
+  let cpuPoints = healthMetricPointsFromPayload(result?.cpuSpikeMetrics24h, "Percentage CPU");
+  if (!cpuPoints.length) cpuPoints = healthMetricPointsFromPayload(result?.platformMetrics, "Percentage CPU");
+  const ramPoints = healthReadMemoryTrendPoints(result);
+  return {
+    cpu: healthSummarizeSpikeSeries(cpuPoints, 85, selectedMinutes),
+    ram: healthSummarizeSpikeSeries(ramPoints, 90, selectedMinutes)
+  };
+}
+
+function healthReadGuestIdentity(result) {
+  const rows = healthRowsFromLawQuery(result?.vmComputerInventory);
+  const inventory = rows[0] || {};
+  const extensions = healthReadExtensions(result);
+  const domainExtension = extensions.find((extension) => {
+    const text = `${extension?.name || ""} ${extension?.properties?.type || ""}`.toLowerCase();
+    return text.includes("jsonaddomainextension") || text.includes("domainjoin");
+  });
+  const extSettings = domainExtension?.properties?.settings || {};
+  const extensionDomain = String(extSettings?.Name || extSettings?.name || extSettings?.Domain || extSettings?.domain || "").trim();
+
+  let dnsNames = inventory?.DnsNames;
+  if (typeof dnsNames === "string") {
+    try { dnsNames = JSON.parse(dnsNames); } catch { dnsNames = dnsNames ? [dnsNames] : []; }
+  }
+  if (!Array.isArray(dnsNames)) dnsNames = [];
+
+  const hostName = String(inventory?.HostName || result?.vm?.ComputerName || result?.hostname || "").trim();
+  const fqdnCandidates = [inventory?.FullDisplayName, inventory?.Computer, ...dnsNames]
+    .map((value) => String(value || "").trim())
+    .filter((value) => value.includes("."));
+  const fqdn = fqdnCandidates.find((value) => !hostName || value.toLowerCase().startsWith(`${hostName.toLowerCase()}.`)) || fqdnCandidates[0] || "";
+  const inferredDomain = fqdn.includes(".") ? fqdn.split(".").slice(1).join(".") : "";
+
+  if (extensionDomain) {
+    return {
+      computerName: hostName || "Unknown",
+      membership: "Domain joined",
+      domain: extensionDomain,
+      workgroup: "-",
+      fqdn: fqdn || "Unknown",
+      source: "JsonADDomainExtension + VM inventory",
+      exact: true
+    };
+  }
+
+  if (inferredDomain) {
+    return {
+      computerName: hostName || "Unknown",
+      membership: "Domain / DNS suffix detected",
+      domain: inferredDomain,
+      workgroup: "Unknown",
+      fqdn,
+      source: "VMComputer inventory",
+      exact: false
+    };
+  }
+
+  return {
+    computerName: hostName || "Unknown",
+    membership: "Unknown",
+    domain: "Unknown",
+    workgroup: "Unknown",
+    fqdn: fqdn || "Unknown",
+    source: rows.length ? "VMComputer inventory" : "No guest inventory returned",
+    exact: false
+  };
+}
+
+function healthBuildSparkline(points, threshold, label) {
+  const source = (Array.isArray(points) ? points : []).filter((point) => healthFiniteNumber(point?.value) !== null);
+  if (!source.length) return `<div class="health-trend-empty">${escapeHtml(label)} trend unavailable.</div>`;
+
+  const maxPoints = 180;
+  const step = Math.max(1, Math.ceil(source.length / maxPoints));
+  const sampled = source.filter((_, index) => index % step === 0 || index === source.length - 1);
+  const width = 600;
+  const height = 110;
+  const pad = 8;
+  const usableW = width - pad * 2;
+  const usableH = height - pad * 2;
+  const coords = sampled.map((point, index) => {
+    const x = pad + (sampled.length <= 1 ? 0 : (index / (sampled.length - 1)) * usableW);
+    const clamped = Math.max(0, Math.min(100, point.value));
+    const y = pad + (1 - clamped / 100) * usableH;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const thresholdY = pad + (1 - Math.max(0, Math.min(100, threshold)) / 100) * usableH;
+  const last = sampled.at(-1);
+
+  return `<div class="health-trend-card"><div class="health-trend-head"><strong>${escapeHtml(label)}</strong><span>24h trend • threshold ${escapeHtml(threshold)}%</span></div><svg class="health-sparkline" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(label)} 24 hour trend"><line class="health-spark-threshold" x1="${pad}" x2="${width-pad}" y1="${thresholdY.toFixed(1)}" y2="${thresholdY.toFixed(1)}"></line><polyline class="health-spark-line" points="${coords}"></polyline></svg><div class="health-trend-foot"><span>Latest ${escapeHtml(healthFormatPercent(last?.value))}</span><span>${escapeHtml(healthFormatDateTime(last?.time))}</span></div></div>`;
+}
+
 function healthReadWindowsEvents(result) {
   return healthRowsFromLawQuery(result?.windowsEvents).map((row) => {
     const firstSeen = row.FirstSeen || row.TimeGenerated || null;
@@ -2999,6 +3172,10 @@ function healthReadLawQueryDiagnostics(result) {
     performanceHttpStatus: number(d.performanceHttpStatus),
     performanceErrorCode: clean(d.performanceErrorCode),
     performanceErrorMessage: clean(d.performanceErrorMessage),
+    memoryTrendStatus: clean(d.memoryTrendStatus || "Unknown"),
+    memoryTrendHttpStatus: number(d.memoryTrendHttpStatus),
+    inventoryStatus: clean(d.inventoryStatus || "Unknown"),
+    inventoryHttpStatus: number(d.inventoryHttpStatus),
     windowsEventStatus: clean(d.windowsEventStatus || "Unknown"),
     windowsEventHttpStatus: number(d.windowsEventHttpStatus),
     windowsEventErrorCode: clean(d.windowsEventErrorCode),
@@ -3012,6 +3189,10 @@ function healthReadLawQueryDiagnostics(result) {
     primaryGuestHttpStatus: number(d.primaryGuestHttpStatus),
     primaryPerformanceStatus: clean(d.primaryPerformanceStatus || "Unknown"),
     primaryPerformanceHttpStatus: number(d.primaryPerformanceHttpStatus),
+    primaryMemoryTrendStatus: clean(d.primaryMemoryTrendStatus || "Unknown"),
+    primaryMemoryTrendHttpStatus: number(d.primaryMemoryTrendHttpStatus),
+    primaryInventoryStatus: clean(d.primaryInventoryStatus || "Unknown"),
+    primaryInventoryHttpStatus: number(d.primaryInventoryHttpStatus),
     primaryWindowsEventStatus: clean(d.primaryWindowsEventStatus || "Unknown"),
     primaryWindowsEventHttpStatus: number(d.primaryWindowsEventHttpStatus)
   };
@@ -3118,7 +3299,7 @@ function deriveVmHealth(result) {
       findings: [{ severity: "Critical", code: "DIAGNOSTIC_FAILED", message: result?.message || "The VM health diagnostic failed." }],
       recommendations: ["Review the Logic App run history and the failed data source before retrying the diagnostic."],
       powerState: "Unknown", provisioningState: "Unknown", agentStatus: "Unknown", resourceHealth: "Unknown",
-      platform: healthReadPlatform({}), guest: healthReadGuest({}), patch: healthReadPatch({}), monitoring: healthReadMonitoring({}, healthReadGuest({})),
+      platform: healthReadPlatform({}), guest: healthReadGuest({}), spikes: healthReadPerformanceSpikes({}), guestIdentity: healthReadGuestIdentity({}), patch: healthReadPatch({}), monitoring: healthReadMonitoring({}, healthReadGuest({})),
       backup: healthReadBackup({}), alerts: [], activity: [], resourceHistory: [], effectiveNSGs: [], windowsEvents: [], windowsEventSummary: { uniqueTotal: 0, criticalUnique24h: 0, errorUnique24h: 0, totalOccurrences: 0, criticalOccurrences: 0, errorOccurrences: 0, recentCriticalUnique: 0, recentCriticalOccurrences: 0, lastCriticalUtc: null }, freshness: { rows: [], state: "Unknown" }
     };
   }
@@ -3130,6 +3311,8 @@ function deriveVmHealth(result) {
   const resourceHealth = String(result?.resourceHealth?.properties?.availabilityState || "Unknown");
   const platform = healthReadPlatform(result);
   const guest = healthReadGuest(result);
+  const spikes = healthReadPerformanceSpikes(result);
+  const guestIdentity = healthReadGuestIdentity(result);
   const patch = healthReadPatch(result);
   const monitoring = healthReadMonitoring(result, guest);
   const backup = healthReadBackup(result);
@@ -3183,6 +3366,12 @@ function deriveVmHealth(result) {
   if (guest.availableMemoryPercent !== null) {
     if (guest.availableMemoryPercent < 10) healthAddFinding(findings, "Critical", "MEMORY_LOW", `Available memory is ${guest.availableMemoryPercent.toFixed(1)}%.`);
     else if (guest.availableMemoryPercent < 20) healthAddFinding(findings, "Warning", "MEMORY_LOW", `Available memory is ${guest.availableMemoryPercent.toFixed(1)}%.`);
+  }
+  if (running && spikes.cpu.spikeCount1h > 0 && !findings.some((finding) => finding.code === "CPU_HIGH")) {
+    healthAddFinding(findings, "Warning", "CPU_SPIKE", `CPU crossed ${spikes.cpu.threshold}% ${spikes.cpu.spikeCount1h} sampled time(s) in the last hour; 1h peak ${healthFormatPercent(spikes.cpu.peak1h)}.`);
+  }
+  if (running && spikes.ram.spikeCount1h > 0 && !findings.some((finding) => finding.code === "MEMORY_LOW")) {
+    healthAddFinding(findings, "Warning", "RAM_SPIKE", `RAM used crossed ${spikes.ram.threshold}% ${spikes.ram.spikeCount1h} sampled time(s) in the last hour; 1h peak ${healthFormatPercent(spikes.ram.peak1h)}.`);
   }
   for (const disk of guest.disks) {
     if (disk.freePercent === null) continue;
@@ -3257,13 +3446,15 @@ function deriveVmHealth(result) {
   if (monitoring.regionalLawFallbackUsed) recommendations.push(`Primary LAW ${monitoring.regionalLawPrimaryName || "central-law-weu-law"} had no matching VM telemetry, so ${monitoring.regionalLawName} was queried as the last-resort fallback. Confirm whether this VM is expected to report to the fallback LAW.`);
   if (!monitoring.vmInsightsDataAvailable) recommendations.push(`Validate VM Insights / InsightsMetrics collection in effective LAW ${monitoring.regionalLawName} before relying on guest memory/disk health.`);
   if (monitoring.heartbeatAgeMinutes !== null && monitoring.heartbeatAgeMinutes > 30) recommendations.push("Investigate the stale VM Insights heartbeat: check AMA extension state, DCR association, outbound connectivity and workspace ingestion.");
+  if (spikes.cpu.spikeCount1h > 0) recommendations.push("Review the CPU 24-hour trend around the latest spike and correlate it with workload, scheduled tasks, services and Windows events.");
+  if (spikes.ram.spikeCount1h > 0) recommendations.push("Review the RAM 24-hour trend around the latest spike and correlate it with process/workload growth and paging pressure.");
   if (windowsEventSummary.criticalUnique24h > 0) recommendations.push("Review the unique Critical Windows System/Application event types, starting with the highest-occurrence and most recently seen Event ID/source.");
   if (patch.criticalSecurityCount > 0) recommendations.push("Review pending Critical/Security patches in Azure Update Manager and schedule remediation through the approved patch process.");
   if (backup.protected.toLowerCase() !== "protected" || /unhealthy|failed/i.test(backup.lastBackupStatus)) recommendations.push("Review Azure Backup protection and the latest backup job before relying on recovery-point availability.");
   if (recommendations.length === 0) recommendations.push("No immediate remediation recommendation was generated from the configured read-only checks.");
 
   const freshness = healthDataFreshness(result, platform, guest, patch, backup, monitoring);
-  return { overall, findings, recommendations, powerState, provisioningState, agentStatus, resourceHealth, platform, guest, patch, monitoring, backup, alerts, activity, resourceHistory, effectiveNSGs, windowsEvents, windowsEventSummary, freshness };
+  return { overall, findings, recommendations, powerState, provisioningState, agentStatus, resourceHealth, platform, guest, spikes, guestIdentity, patch, monitoring, backup, alerts, activity, resourceHistory, effectiveNSGs, windowsEvents, windowsEventSummary, freshness };
 }
 
 function healthBadgeClass(status) {
@@ -3292,6 +3483,7 @@ function healthBuildConfiguration(result, view) {
   const vCpuCount = healthFiniteNumber(hardware.vCpuCount);
   const memoryMb = healthFiniteNumber(hardware.memoryMB);
   const memoryGb = memoryMb === null ? null : memoryMb / 1024;
+  const guestIdentity = view?.guestIdentity || healthReadGuestIdentity(result);
   const rows = [
     ["Azure VM name", vm.VMName || "Unknown"], ["OS hostname", vm.ComputerName || vm.Hostname || result?.hostname || "Unknown"],
     ["Subscription", vm.SubscriptionName || vm.SubscriptionId || "Unknown"], ["Resource group", vm.ResourceGroup || "Unknown"],
@@ -3299,6 +3491,11 @@ function healthBuildConfiguration(result, view) {
     ["vCPUs", vCpuCount === null ? "Unknown" : healthFormatNumber(vCpuCount, 0)],
     ["RAM", memoryGb === null ? "Unknown" : `${healthFormatNumber(memoryGb, memoryGb % 1 === 0 ? 0 : 1)} GB`],
     ["OS type", vm.OSType || "Unknown"],
+    ["Domain / workgroup", guestIdentity.membership || "Unknown"],
+    ["Domain / DNS suffix", guestIdentity.domain || "Unknown"],
+    ["Workgroup", guestIdentity.workgroup || "Unknown"],
+    ["FQDN", guestIdentity.fqdn || "Unknown"],
+    ["Guest identity source", guestIdentity.source || "Unknown"],
     ["Security type", vm.SecurityType || "Standard / not reported"], ["Managed identity", vm.IdentityType || "None / not reported"],
     ["Boot diagnostics", vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown"],
     ["Power state", view.powerState], ["Provisioning state", view.provisioningState], ["VM Agent", view.agentStatus], ["Resource ID", vm.ResourceId || "Unknown"]
@@ -3319,11 +3516,14 @@ function healthCopyText(result) {
   const memoryMb = healthFiniteNumber(hardware.memoryMB);
   const memoryGb = memoryMb === null ? null : memoryMb / 1024;
   return [
-    `VM Health Diagnostic V2.6.8`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
+    `VM Health Diagnostic V2.7.0`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
     `Power: ${v.powerState}`, `Resource Health: ${v.resourceHealth}`, `Active alerts: ${v.alerts.length}`,
     `CPU avg/max: ${healthIsRunning(v.powerState) ? `${healthFormatPercent(v.platform.cpu.average)} / ${healthFormatPercent(v.platform.cpu.maximum)}` : "N/A - VM not running"}`,
     `vCPUs: ${vCpuCount === null ? "Unknown" : healthFormatNumber(vCpuCount, 0)}`,
     `RAM: ${memoryGb === null ? "Unknown" : `${healthFormatNumber(memoryGb, memoryGb % 1 === 0 ? 0 : 1)} GB`}`,
+    `Domain/workgroup: ${v.guestIdentity.membership}; domain=${v.guestIdentity.domain}; workgroup=${v.guestIdentity.workgroup}`,
+    `CPU spikes: peak1h=${healthFormatPercent(v.spikes.cpu.peak1h)}; peak24h=${healthFormatPercent(v.spikes.cpu.peak24h)}; spikes24h=${v.spikes.cpu.spikeCount24h}; last=${healthFormatDateTime(v.spikes.cpu.lastSpike24hUtc)}`,
+    `RAM spikes: peak1h=${healthFormatPercent(v.spikes.ram.peak1h)}; peak24h=${healthFormatPercent(v.spikes.ram.peak24h)}; spikes24h=${v.spikes.ram.spikeCount24h}; last=${healthFormatDateTime(v.spikes.ram.lastSpike24hUtc)}`,
     `Memory available: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.availableMemoryPercent) : "N/A - VM not running"}`,
     `Lowest disk free: ${healthIsRunning(v.powerState) ? healthFormatPercent(v.guest.lowestDiskFreePercent) : "N/A - VM not running"}`,
     `Backup: ${v.backup.protected}; last=${v.backup.lastBackupStatus}; ${healthAgeText(v.backup.lastBackupTime)}`,
@@ -3646,7 +3846,7 @@ function healthDownloadPdfReport(result) {
       </div>
       <div class="health-pdf-meta">
         <div><strong>Generated:</strong> ${escapeHtml(generatedDisplay)}</div>
-        <div><strong>Portal:</strong> VM Health Diagnostic V2.6.8</div>
+        <div><strong>Portal:</strong> VM Health Diagnostic V2.7.0</div>
       </div>
     </header>
 
@@ -3697,6 +3897,8 @@ function healthBuildVmCard(result, index) {
     memoryGb === null ? null : `${healthFormatNumber(memoryGb, memoryGb % 1 === 0 ? 0 : 1)} GB RAM`
   ].filter(Boolean).join(" • ");
   const guest = view.guest;
+  const spikes = view.spikes;
+  const guestIdentity = view.guestIdentity;
   const patch = view.patch;
   const monitoring = view.monitoring;
   const backup = view.backup;
@@ -3710,6 +3912,13 @@ function healthBuildVmCard(result, index) {
   const patchDisplay = patch.available ? `${patch.totalPending} pending` : "Unknown";
   const monitorDisplay = monitoring.heartbeatState === "Reporting" ? (monitoring.vmInsightsDataAvailable ? "Reporting" : "Reporting / Partial") : monitoring.heartbeatState !== "Unknown" ? monitoring.heartbeatState : monitoring.vmInsightsDataAvailable ? "Partial" : "Unknown";
   const memoryDisplay = !running ? "N/A – VM not running" : guest.availableMemoryPercent !== null ? healthFormatPercent(guest.availableMemoryPercent) : guest.availableMemoryMb !== null ? `${healthFormatNumber(guest.availableMemoryMb, 0)} MB` : "Unknown";
+  const ramUsedDisplay = !running
+    ? "N/A – VM not running"
+    : spikes.ram.available
+      ? healthFormatPercent(spikes.ram.current)
+      : guest.availableMemoryPercent !== null
+        ? healthFormatPercent(Math.max(0, Math.min(100, 100 - guest.availableMemoryPercent)))
+        : "Unknown";
   const diskDisplay = !running ? "N/A – VM not running" : guest.lowestDiskFreePercent !== null ? healthFormatPercent(guest.lowestDiskFreePercent) : guest.lowestDiskFreeMb !== null ? `${healthFormatNumber(guest.lowestDiskFreeMb, 0)} MB` : "Unknown";
 
   const driveLetterDisks = guest.individualDisks.filter((disk) => /^[A-Za-z]:$/.test(String(disk.instance || "").trim()));
@@ -3745,15 +3954,48 @@ function healthBuildVmCard(result, index) {
     ? `<span class="health-disk-system-note">${escapeHtml(`${systemVolumeDisks.length} system volume${systemVolumeDisks.length === 1 ? "" : "s"} available in details`)}</span>`
     : "";
 
-  const findingsHtml = view.findings.length ? `<ul>${view.findings.map((finding) => `<li class="health-finding-${finding.severity.toLowerCase()}"><strong>${escapeHtml(finding.severity)}:</strong> ${escapeHtml(finding.message)}</li>`).join("")}</ul>` : '<div class="health-empty">No warning or critical findings were identified by the configured V2 rules.</div>';
+  const findingsHtml = view.findings.length ? `<ul>${view.findings.map((finding) => `<li class="health-finding-${finding.severity.toLowerCase()}"><strong>${escapeHtml(finding.severity)}:</strong> ${escapeHtml(finding.message)}</li>`).join("")}</ul>` : '<div class="health-empty">No warning or critical findings were identified by the configured V2.7 rules.</div>';
 
   const guestDiskTable = healthBuildMiniTable([
     { label: "Drive / mount", value: (r) => r.instance },
     { label: "Free %", value: (r) => r.freePercent === null ? "Unknown" : `${r.freePercent.toFixed(1)}%` },
     { label: "Free GB", value: (r) => r.freeMb === null ? "Unknown" : healthFormatNumber(r.freeMb / 1024, 1) },
+    { label: "Total GB", value: (r) => {
+        if (r.freeMb === null || r.freePercent === null || r.freePercent <= 0) return "Unknown";
+        return healthFormatNumber((r.freeMb / 1024) / (r.freePercent / 100), 1);
+      }
+    },
+    { label: "Used GB", value: (r) => {
+        if (r.freeMb === null || r.freePercent === null || r.freePercent <= 0) return "Unknown";
+        const freeGb = r.freeMb / 1024;
+        const totalGb = freeGb / (r.freePercent / 100);
+        return healthFormatNumber(Math.max(0, totalGb - freeGb), 1);
+      }
+    },
     { label: "Scope", value: (r) => r.isOverallTotal ? "Overall (_Total)" : "Individual drive" },
     { label: "Last sample", value: (r) => healthFormatDateTime(r.timeGenerated) }
   ], guest.disks);
+
+
+  const spikeTable = healthBuildMiniTable([
+    { label: "Metric", value: (r) => r.metric },
+    { label: "Current", value: (r) => r.summary.available ? healthFormatPercent(r.summary.current) : "Unknown" },
+    { label: "Avg 1h", value: (r) => r.summary.available ? healthFormatPercent(r.summary.average1h) : "Unknown" },
+    { label: "Peak 1h", value: (r) => r.summary.available ? healthFormatPercent(r.summary.peak1h) : "Unknown" },
+    { label: "Peak 24h", value: (r) => r.summary.available ? healthFormatPercent(r.summary.peak24h) : "Unknown" },
+    { label: "Spikes 1h", value: (r) => r.summary.available ? String(r.summary.spikeCount1h) : "Unknown" },
+    { label: "Spikes 24h", value: (r) => r.summary.available ? String(r.summary.spikeCount24h) : "Unknown" },
+    { label: "Last spike", value: (r) => r.summary.lastSpike24hUtc ? healthFormatDateTime(r.summary.lastSpike24hUtc) : r.summary.available ? "None" : "Unknown" },
+    { label: "Source", value: (r) => r.summary.source || "Unknown" }
+  ], [
+    { metric: "CPU used", summary: spikes.cpu },
+    { metric: "RAM used", summary: spikes.ram }
+  ]);
+
+  const spikeChartsHtml = `<div class="health-trend-grid">${healthBuildSparkline(spikes.cpu.points, spikes.cpu.threshold, "CPU used")}${healthBuildSparkline(spikes.ram.points, spikes.ram.threshold, "RAM used")}</div>`;
+  const guestIdentityNote = guestIdentity.exact
+    ? `Domain membership detected from ${guestIdentity.source}.`
+    : `Read-only telemetry reports ${guestIdentity.membership}. Exact Windows workgroup membership is not exposed by VMComputer; it remains Unknown unless a guest-side collector is enabled.`;
 
   const managedDiskTable = healthBuildMiniTable([
     { label: "Disk", value: (r) => r.Name || "Unknown" }, { label: "Size GB", value: (r) => r.SizeGB ?? "Unknown" }, { label: "SKU", value: (r) => r.Sku || "Unknown" },
@@ -3904,8 +4146,8 @@ function healthBuildVmCard(result, index) {
             : ""}
 
       <div class="health-details">
-        <details><summary>VM configuration &amp; runtime</summary><div class="health-details-body">${healthBuildConfiguration(result, view)}</div></details>
-        <details><summary>Performance</summary><div class="health-details-body"><div class="health-metric-grid"><div class="health-metric-box"><span>CPU average</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.average))}</strong></div><div class="health-metric-box"><span>CPU maximum</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</strong></div><div class="health-metric-box"><span>Metric latest</span><strong>${escapeHtml(healthFormatDateTime(view.platform.cpu.latestUtc))}</strong></div><div class="health-metric-box"><span>Network in</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Network out</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Period</span><strong>${escapeHtml(`${result?.periodMinutes || ""} min`)}</strong></div></div>${freshnessTable}</div></details>
+        <details><summary>VM configuration &amp; runtime</summary><div class="health-details-body">${healthBuildConfiguration(result, view)}<p class="health-inline-note">${escapeHtml(guestIdentityNote)}</p></div></details>
+        <details><summary>Performance</summary><div class="health-details-body"><div class="health-metric-grid"><div class="health-metric-box"><span>CPU average</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.average))}</strong></div><div class="health-metric-box"><span>CPU maximum</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</strong></div><div class="health-metric-box"><span>CPU latest</span><strong>${escapeHtml(spikes.cpu.available ? healthFormatPercent(spikes.cpu.current) : runtimeMetric(view.platform.cpu.latest))}</strong></div><div class="health-metric-box"><span>RAM used latest</span><strong>${escapeHtml(ramUsedDisplay)}</strong></div><div class="health-metric-box"><span>Network in</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Network out</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Period</span><strong>${escapeHtml(`${result?.periodMinutes || ""} min`)}</strong></div></div><h4 class="health-section-heading">CPU / RAM spike analysis</h4><p class="health-inline-note">CPU spike threshold: 85%. RAM-used spike threshold: 90%. CPU uses Azure platform 1-minute metrics; RAM uses the effective Log Analytics workspace (Perf preferred, VM Insights fallback).</p>${spikeTable}${spikeChartsHtml}<h4 class="health-section-heading">Data freshness</h4>${freshnessTable}</div></details>
         <details><summary>Storage &amp; disk performance</summary><div class="health-details-body"><h4 class="health-section-heading">Azure managed disks</h4>${managedDiskTable}<h4 class="health-section-heading">Guest logical disks</h4>${guestDiskTable}<h4 class="health-section-heading">Platform disk performance</h4>${diskPerfTable}</div></details>
         <details><summary>Network &amp; security configuration</summary><div class="health-details-body"><h4 class="health-section-heading">NIC configuration</h4>${networkTable}<h4 class="health-section-heading">Effective network security groups</h4>${nsgTable}</div></details>
         <details><summary>Azure alerts &amp; recent changes</summary><div class="health-details-body"><h4 class="health-section-heading">Active fired alerts</h4>${alertTable}<h4 class="health-section-heading">Azure Activity Log - last 24 hours</h4>${activityTable}</div></details>
@@ -3916,7 +4158,7 @@ function healthBuildVmCard(result, index) {
           ${windowsEventTable}
         </div></details>
         <details><summary>VM extensions</summary><div class="health-details-body">${extensionTable}</div></details>
-        <details><summary>Monitoring / Regional LAW / AMA / DCR</summary><div class="health-details-body"><p class="field-help">Effective LAW: <strong>${escapeHtml(monitoring.regionalLawName)}</strong>${monitoring.regionalLawFallbackUsed ? ` • <strong>Fallback used</strong>: ${escapeHtml(monitoring.regionalLawPrimaryName || "central-law-weu-law")} → ${escapeHtml(monitoring.regionalLawFallbackName || monitoring.regionalLawName)}` : ` • Primary LAW used: <strong>${escapeHtml(monitoring.regionalLawPrimaryName || monitoring.regionalLawName)}</strong>`}${monitoring.regionalLawLocation ? ` • LAW region: <strong>${escapeHtml(monitoring.regionalLawLocation)}</strong>` : ""}${monitoring.regionalLawResourceGroup ? ` • LAW RG: <strong>${escapeHtml(monitoring.regionalLawResourceGroup)}</strong>` : ""} • LAW lookup: <strong>${escapeHtml(monitoring.regionalLawLookupStatus)}</strong> • Workspace ID: <strong>${escapeHtml(monitoring.regionalLawWorkspaceId || "Unknown")}</strong> • AMA: <strong>${escapeHtml(monitoring.amaInstalled ? monitoring.amaProvisioningState : "Not detected")}</strong> • DCR associations: <strong>${escapeHtml(monitoring.dcrCount)}</strong> • VM Insights data: <strong>${escapeHtml(monitoring.vmInsightsDataAvailable ? "Available" : "Unknown")}</strong> • Last heartbeat: <strong>${escapeHtml(healthFormatDateTime(monitoring.heartbeatUtc))}</strong> (${escapeHtml(healthAgeText(monitoring.heartbeatUtc))})</p>${monitoring.regionalLawFallbackUsed ? `<p class="health-inline-note"><strong>Last-resort LAW fallback was used.</strong> No Heartbeat, InsightsMetrics or Perf rows matching this VM were returned from the primary regional LAW.</p>` : ""}<h4 class="health-section-heading">LAW query diagnostics</h4><div class="health-table-wrap"><table class="health-table"><thead><tr><th>Source</th><th>Query</th><th>Logic App status</th><th>HTTP</th><th>Error</th></tr></thead><tbody>${monitoring.regionalLawFallbackUsed ? `<tr><td>Primary</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>Windows events</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryWindowsEventStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryWindowsEventHttpStatus || "-")}</td><td>-</td></tr>` : ""}<tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatErrorCode || monitoring.lawDiagnostics?.heartbeatErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestErrorCode || monitoring.lawDiagnostics?.guestErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceErrorCode || monitoring.lawDiagnostics?.performanceErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Windows events</td><td>${escapeHtml(monitoring.lawDiagnostics?.windowsEventStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.windowsEventHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.windowsEventErrorCode || monitoring.lawDiagnostics?.windowsEventErrorMessage || "-")}</td></tr></tbody></table></div><h4 class="health-section-heading">DCR associations</h4>${dcrTable}<h4 class="health-section-heading">LAW performance counters (when collected)</h4>${lawPerformanceTable}</div></details>
+        <details><summary>Monitoring / Regional LAW / AMA / DCR</summary><div class="health-details-body"><p class="field-help">Effective LAW: <strong>${escapeHtml(monitoring.regionalLawName)}</strong>${monitoring.regionalLawFallbackUsed ? ` • <strong>Fallback used</strong>: ${escapeHtml(monitoring.regionalLawPrimaryName || "central-law-weu-law")} → ${escapeHtml(monitoring.regionalLawFallbackName || monitoring.regionalLawName)}` : ` • Primary LAW used: <strong>${escapeHtml(monitoring.regionalLawPrimaryName || monitoring.regionalLawName)}</strong>`}${monitoring.regionalLawLocation ? ` • LAW region: <strong>${escapeHtml(monitoring.regionalLawLocation)}</strong>` : ""}${monitoring.regionalLawResourceGroup ? ` • LAW RG: <strong>${escapeHtml(monitoring.regionalLawResourceGroup)}</strong>` : ""} • LAW lookup: <strong>${escapeHtml(monitoring.regionalLawLookupStatus)}</strong> • Workspace ID: <strong>${escapeHtml(monitoring.regionalLawWorkspaceId || "Unknown")}</strong> • AMA: <strong>${escapeHtml(monitoring.amaInstalled ? monitoring.amaProvisioningState : "Not detected")}</strong> • DCR associations: <strong>${escapeHtml(monitoring.dcrCount)}</strong> • VM Insights data: <strong>${escapeHtml(monitoring.vmInsightsDataAvailable ? "Available" : "Unknown")}</strong> • Last heartbeat: <strong>${escapeHtml(healthFormatDateTime(monitoring.heartbeatUtc))}</strong> (${escapeHtml(healthAgeText(monitoring.heartbeatUtc))})</p>${monitoring.regionalLawFallbackUsed ? `<p class="health-inline-note"><strong>Last-resort LAW fallback was used.</strong> No Heartbeat, InsightsMetrics or Perf rows matching this VM were returned from the primary regional LAW.</p>` : ""}<h4 class="health-section-heading">LAW query diagnostics</h4><div class="health-table-wrap"><table class="health-table"><thead><tr><th>Source</th><th>Query</th><th>Logic App status</th><th>HTTP</th><th>Error</th></tr></thead><tbody>${monitoring.regionalLawFallbackUsed ? `<tr><td>Primary</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryHeartbeatHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryGuestHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryPerformanceHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>Memory trend 24h</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryMemoryTrendStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryMemoryTrendHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>VM inventory</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryInventoryStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryInventoryHttpStatus || "-")}</td><td>-</td></tr><tr><td>Primary</td><td>Windows events</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryWindowsEventStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.primaryWindowsEventHttpStatus || "-")}</td><td>-</td></tr>` : ""}<tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Heartbeat</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.heartbeatErrorCode || monitoring.lawDiagnostics?.heartbeatErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Guest metrics</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.guestErrorCode || monitoring.lawDiagnostics?.guestErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>LAW performance</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.performanceErrorCode || monitoring.lawDiagnostics?.performanceErrorMessage || "-")}</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Memory trend 24h</td><td>${escapeHtml(monitoring.lawDiagnostics?.memoryTrendStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.memoryTrendHttpStatus || "-")}</td><td>-</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>VM inventory</td><td>${escapeHtml(monitoring.lawDiagnostics?.inventoryStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.inventoryHttpStatus || "-")}</td><td>-</td></tr><tr><td>${escapeHtml(monitoring.regionalLawFallbackUsed ? "Fallback" : "Primary")}</td><td>Windows events</td><td>${escapeHtml(monitoring.lawDiagnostics?.windowsEventStatus || "Unknown")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.windowsEventHttpStatus || "-")}</td><td>${escapeHtml(monitoring.lawDiagnostics?.windowsEventErrorCode || monitoring.lawDiagnostics?.windowsEventErrorMessage || "-")}</td></tr></tbody></table></div><h4 class="health-section-heading">DCR associations</h4>${dcrTable}<h4 class="health-section-heading">LAW performance counters (when collected)</h4>${lawPerformanceTable}</div></details>
         <details><summary>Backup &amp; patching</summary><div class="health-details-body"><h4 class="health-section-heading">Azure Backup</h4>${backupTable}<h4 class="health-section-heading">Update Manager</h4><p class="field-help">Assessment: <strong>${escapeHtml(healthFormatDateTime(patch.lastAssessmentUtc))}</strong> (${escapeHtml(healthAgeText(patch.lastAssessmentUtc))}) • Reboot pending: <strong>${escapeHtml(patch.rebootPending === null ? "Unknown" : String(patch.rebootPending))}</strong></p>${patchTable}</div></details>
         <details><summary>Boot diagnostics</summary><div class="health-details-body"><p class="field-help">Boot diagnostics configuration: <strong>${escapeHtml(vm.BootDiagnosticsEnabled === true ? "Enabled" : vm.BootDiagnosticsEnabled === false ? "Disabled" : "Unknown")}</strong>.</p><p class="health-inline-note">For security, this report does not return temporary screenshot/serial-log SAS URLs. Use <strong>Open VM in Azure</strong> and the Boot diagnostics blade when detailed boot artifacts are needed.</p></div></details>
         <details><summary>Recommendations</summary><div class="health-details-body"><ol class="health-recommendations">${view.recommendations.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ol></div></details>

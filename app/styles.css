@@ -233,3 +233,83 @@
   border-color: #6e9fc2;
   background: #edf6fd;
 }
+
+/* VM Health V2.7.0 - CPU/RAM spike trend cards */
+.health-trend-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.health-trend-card {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid #d9e2ec;
+  border-radius: 10px;
+  background: #fbfdff;
+}
+
+.health-trend-head,
+.health-trend-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.health-trend-head strong {
+  color: #203a51;
+  font-size: 12px;
+}
+
+.health-trend-head span,
+.health-trend-foot {
+  color: #63778a;
+  font-size: 10.5px;
+}
+
+.health-sparkline {
+  display: block;
+  width: 100%;
+  height: 90px;
+  margin: 9px 0 7px;
+  overflow: visible;
+}
+
+.health-spark-line {
+  fill: none;
+  stroke: #2879b9;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.health-spark-threshold {
+  stroke: #ba4a4a;
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+  opacity: .75;
+  vector-effect: non-scaling-stroke;
+}
+
+.health-trend-empty {
+  min-height: 128px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  border: 1px dashed #cdd9e5;
+  border-radius: 10px;
+  background: #fbfdff;
+  color: #63778a;
+  font-size: 11px;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .health-trend-grid {
+    grid-template-columns: 1fr;
+  }
+}

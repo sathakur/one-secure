@@ -1,0 +1,21 @@
+{
+  "note": "MERGE this data source into the existing approved DCR. This is not a complete deployable DCR because workspace destinations/dataFlows are environment-specific.",
+  "dataSources": {
+    "performanceCounters": [
+      {
+        "name": "vmHealthV270WindowsPerf60s",
+        "streams": [
+          "Microsoft-Perf"
+        ],
+        "samplingFrequencyInSeconds": 60,
+        "counterSpecifiers": [
+          "\\\\Processor(_Total)\\\\% Processor Time",
+          "\\\\Memory\\\\Available MBytes",
+          "\\\\Memory\\\\% Committed Bytes In Use",
+          "\\\\LogicalDisk(*)\\\\% Free Space",
+          "\\\\LogicalDisk(*)\\\\Free Megabytes"
+        ]
+      }
+    ]
+  }
+}
