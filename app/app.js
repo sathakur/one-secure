@@ -601,7 +601,25 @@ function buildSnapshotStatusTable(items) {
         item.lun !== undefined &&
         item.lun !== null
           ? `Data (LUN ${item.lun})`
-          : item.diskType || "VM";
+          : item.diskType || (item.status === "Excluded" ? "Policy" : "VM");
+
+      const cleanTagMatches = (value) =>
+        (Array.isArray(value) ? value : [])
+          .map((entry) => String(entry || "").trim())
+          .filter(Boolean);
+
+      const vmTagMatches = cleanTagMatches(item.vmGxPTagMatches);
+      const subscriptionTagMatches = cleanTagMatches(item.subscriptionGxPTagMatches);
+
+      const gxpAudit =
+        item.status === "Excluded"
+          ? [
+              `VM classification: ${item.vmGxPStatus || "Unknown"}`,
+              `Subscription classification: ${item.subscriptionGxPStatus || "Unknown"}`,
+              vmTagMatches.length ? `VM tags: ${vmTagMatches.join(", ")}` : "",
+              subscriptionTagMatches.length ? `Subscription tags: ${subscriptionTagMatches.join(", ")}` : ""
+            ].filter(Boolean).join(" • ")
+          : "";
 
       return `
         <tr>
@@ -621,10 +639,13 @@ function buildSnapshotStatusTable(items) {
             </span>
           </td>
           <td>${escapeHtml(
-            item.message ||
-            item.reason ||
-            formatStatusDetails(item.details) ||
-            ""
+            [
+              item.message ||
+              item.reason ||
+              formatStatusDetails(item.details) ||
+              "",
+              gxpAudit
+            ].filter(Boolean).join(" | ")
           )}</td>
         </tr>`;
     })
@@ -653,12 +674,12 @@ function renderSnapshotStatus(result) {
   const status = result.status || "Submitted";
   const snapshotRows = Array.isArray(result.results) ? result.results : [];
   const excludedRows = snapshotRows.filter((item) => item?.status === "Excluded");
-  const excludedHostnames = new Set(
+  const excludedHosts = new Set(
     excludedRows
       .map((item) => String(item?.hostname || "").trim().toUpperCase())
       .filter(Boolean)
   );
-  const excludedCount = excludedHostnames.size || excludedRows.length;
+  const excludedCount = excludedHosts.size || excludedRows.length;
   const allReturnedRowsExcluded =
     snapshotRows.length > 0 &&
     excludedRows.length === snapshotRows.length;
@@ -765,11 +786,11 @@ function renderSnapshotStatus(result) {
       excludedCount > 0
         ? `
           <div class="information-note">
-            <strong>GxP policy:</strong>
+            <strong>GxP compliance:</strong>
             ${escapeHtml(excludedCount)} VM${excludedCount === 1 ? "" : "s"} ${
               excludedCount === 1 ? "was" : "were"
-            } excluded because the VM or its Azure subscription was classified as
-            GxP or Conflict. No snapshot is created for an excluded VM.
+            } blocked. The Details column shows the VM/subscription classification
+            and the matched GxP tags returned by Azure Resource Graph.
           </div>`
         : ""
     }

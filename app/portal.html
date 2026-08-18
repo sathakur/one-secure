@@ -127,10 +127,10 @@
               <article class="requirement-card"><div class="requirement-number">02</div><div><h3>Snapshot scope</h3><p>Select the OS disk only or the OS disk and all attached data disks.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">03</div><div><h3>VM request limit</h3><p>A single snapshot request can contain a maximum of 5 unique VM hostnames.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">04</div><div><h3>User request quota</h3><p>Each entered user name can submit up to 3 snapshot requests in any rolling 24-hour period.</p></div></article>
-              <article class="requirement-card"><div class="requirement-number">05</div><div><h3>GxP exclusion</h3><p>VMs classified as <strong>GxP</strong> or <strong>Conflict</strong>, or VMs inside a GxP/Conflict subscription, are excluded from this snapshot solution.</p></div></article>
+              <article class="requirement-card"><div class="requirement-number">05</div><div><h3>GxP compliance gate</h3><p>The Snapshot Logic App performs a separate server-side compliance query. <strong>GxP</strong> and <strong>Conflict</strong> classifications at VM or subscription level are blocked before snapshot creation.</p></div></article>
             </div>
           </section>
-          <section class="policy-card"><div class="policy-title">🛡 Recovery-point &amp; GxP policy</div><p>Retention and expiry metadata remain unchanged. GxP eligibility is enforced server-side in the Snapshot Logic App at both <strong>VM</strong> and <strong>subscription</strong> level before any snapshot resource is created.</p></section>
+          <section class="policy-card"><div class="policy-title">🛡 Recovery-point &amp; GxP policy</div><p>GxP validation is fail-closed. If the compliance query fails or cannot return one auditable classification for a uniquely matched VM, no snapshot is created.</p></section>
         </aside>
       </div>
       <section id="snapshotResultArea" class="card result-card" hidden aria-live="polite"></section>
@@ -217,6 +217,6 @@
 
     <footer class="portal-footer"><span>Azure VM Operations Portal</span><span>Enterprise self-service • Manual requester identification</span></footer>
   </main>
-  <script src="/app.js?v=20260818-snapshot-gxp-exclusion-v1"></script>
+  <script src="/app.js?v=20260818-snapshot-gxp-v2-fixed"></script>
 </body>
 </html>
