@@ -613,7 +613,9 @@ function buildSnapshotStatusTable(items) {
             <span class="badge ${
               item.status === "Created"
                 ? "badge-success"
-                : "badge-error"
+                : item.status === "Excluded"
+                  ? "badge-warning"
+                  : "badge-error"
             }">
               ${escapeHtml(item.status || "Unknown")}
             </span>
@@ -649,16 +651,32 @@ function buildSnapshotStatusTable(items) {
 
 function renderSnapshotStatus(result) {
   const status = result.status || "Submitted";
+  const snapshotRows = Array.isArray(result.results) ? result.results : [];
+  const excludedRows = snapshotRows.filter((item) => item?.status === "Excluded");
+  const excludedHostnames = new Set(
+    excludedRows
+      .map((item) => String(item?.hostname || "").trim().toUpperCase())
+      .filter(Boolean)
+  );
+  const excludedCount = excludedHostnames.size || excludedRows.length;
+  const allReturnedRowsExcluded =
+    snapshotRows.length > 0 &&
+    excludedRows.length === snapshotRows.length;
 
   let bannerClass = "status-warning";
   let heading = "Snapshot creation in progress";
 
-  if (status === "Completed") {
+  if (allReturnedRowsExcluded) {
+    bannerClass = "status-warning";
+    heading = "Snapshot request excluded by GxP policy";
+  } else if (status === "Completed") {
     bannerClass = "status-success";
     heading = "VM snapshots created successfully";
   } else if (status === "PartiallyCompleted") {
     bannerClass = "status-warning";
-    heading = "Snapshot request partially completed";
+    heading = excludedCount > 0
+      ? "Snapshot request partially completed — GxP exclusions applied"
+      : "Snapshot request partially completed";
   } else if (status === "Failed") {
     bannerClass = "status-error";
     heading = "Snapshot request failed";
@@ -716,6 +734,10 @@ function renderSnapshotStatus(result) {
         <span>Failures</span>
       </div>
       <div class="summary-item">
+        <strong>${escapeHtml(excludedCount)}</strong>
+        <span>GxP excluded</span>
+      </div>
+      <div class="summary-item">
         <strong>${escapeHtml(
           result.retentionDays
             ? `${result.retentionDays} day${
@@ -736,6 +758,19 @@ function renderSnapshotStatus(result) {
         <span>Expires</span>
       </div>
     </div>`
+        : ""
+    }
+
+    ${
+      excludedCount > 0
+        ? `
+          <div class="information-note">
+            <strong>GxP policy:</strong>
+            ${escapeHtml(excludedCount)} VM${excludedCount === 1 ? "" : "s"} ${
+              excludedCount === 1 ? "was" : "were"
+            } excluded because the VM or its Azure subscription was classified as
+            GxP or Conflict. No snapshot is created for an excluded VM.
+          </div>`
         : ""
     }
 
