@@ -569,6 +569,7 @@ function snapshotStatusIsTerminal(status) {
   return [
     "Completed",
     "PartiallyCompleted",
+    "Excluded",
     "Failed"
   ].includes(status);
 }
@@ -594,6 +595,28 @@ function buildSnapshotStatusTable(items) {
     return "";
   }
 
+  const formatTagRows = (value) => {
+    if (!Array.isArray(value)) return "";
+
+    return value
+      .map((entry) => {
+        if (!entry) return "";
+
+        if (typeof entry === "string") {
+          return entry.trim();
+        }
+
+        const tagName = String(entry.TagName || entry.tagName || "").trim();
+        const tagValue = String(entry.TagValue || entry.tagValue || "").trim();
+
+        return tagName
+          ? `${tagName} = ${tagValue}`
+          : "";
+      })
+      .filter(Boolean)
+      .join(", ");
+  };
+
   const rows = items
     .map((item) => {
       const diskLabel =
@@ -601,25 +624,50 @@ function buildSnapshotStatusTable(items) {
         item.lun !== undefined &&
         item.lun !== null
           ? `Data (LUN ${item.lun})`
-          : item.diskType || (item.status === "Excluded" ? "Policy" : "VM");
+          : item.diskType ||
+            (item.status === "Excluded" ? "Policy" : "VM");
 
-      const cleanTagMatches = (value) =>
-        (Array.isArray(value) ? value : [])
-          .map((entry) => String(entry || "").trim())
-          .filter(Boolean);
+      const positiveVmTags = formatTagRows(item.vmPositiveGxPTags);
+      const negativeVmTags = formatTagRows(item.vmNegativeGxPTags);
+      const positiveSubscriptionTags =
+        formatTagRows(item.subscriptionPositiveGxPTags);
+      const negativeSubscriptionTags =
+        formatTagRows(item.subscriptionNegativeGxPTags);
 
-      const vmTagMatches = cleanTagMatches(item.vmGxPTagMatches);
-      const subscriptionTagMatches = cleanTagMatches(item.subscriptionGxPTagMatches);
-
-      const gxpAudit =
+      const gxpDetails =
         item.status === "Excluded"
           ? [
               `VM classification: ${item.vmGxPStatus || "Unknown"}`,
               `Subscription classification: ${item.subscriptionGxPStatus || "Unknown"}`,
-              vmTagMatches.length ? `VM tags: ${vmTagMatches.join(", ")}` : "",
-              subscriptionTagMatches.length ? `Subscription tags: ${subscriptionTagMatches.join(", ")}` : ""
-            ].filter(Boolean).join(" • ")
+              positiveVmTags ? `VM GxP tags: ${positiveVmTags}` : "",
+              negativeVmTags ? `VM Non-GxP tags: ${negativeVmTags}` : "",
+              positiveSubscriptionTags
+                ? `Subscription GxP tags: ${positiveSubscriptionTags}`
+                : "",
+              negativeSubscriptionTags
+                ? `Subscription Non-GxP tags: ${negativeSubscriptionTags}`
+                : ""
+            ]
+              .filter(Boolean)
+              .join(" • ")
           : "";
+
+      const detailText = [
+        item.message ||
+          item.reason ||
+          formatStatusDetails(item.details) ||
+          "",
+        gxpDetails
+      ]
+        .filter(Boolean)
+        .join(" | ");
+
+      const badgeClass =
+        item.status === "Created"
+          ? "badge-success"
+          : item.status === "Excluded"
+            ? "badge-warning"
+            : "badge-error";
 
       return `
         <tr>
@@ -628,25 +676,11 @@ function buildSnapshotStatusTable(items) {
           <td>${escapeHtml(item.sourceDiskName || "")}</td>
           <td>${escapeHtml(item.snapshotName || "")}</td>
           <td>
-            <span class="badge ${
-              item.status === "Created"
-                ? "badge-success"
-                : item.status === "Excluded"
-                  ? "badge-warning"
-                  : "badge-error"
-            }">
+            <span class="badge ${badgeClass}">
               ${escapeHtml(item.status || "Unknown")}
             </span>
           </td>
-          <td>${escapeHtml(
-            [
-              item.message ||
-              item.reason ||
-              formatStatusDetails(item.details) ||
-              "",
-              gxpAudit
-            ].filter(Boolean).join(" | ")
-          )}</td>
+          <td>${escapeHtml(detailText)}</td>
         </tr>`;
     })
     .join("");
@@ -673,24 +707,16 @@ function buildSnapshotStatusTable(items) {
 function renderSnapshotStatus(result) {
   const status = result.status || "Submitted";
   const snapshotRows = Array.isArray(result.results) ? result.results : [];
-  const excludedRows = snapshotRows.filter((item) => item?.status === "Excluded");
-  const excludedHosts = new Set(
-    excludedRows
-      .map((item) => String(item?.hostname || "").trim().toUpperCase())
-      .filter(Boolean)
-  );
-  const excludedCount = excludedHosts.size || excludedRows.length;
-  const allReturnedRowsExcluded =
-    snapshotRows.length > 0 &&
-    excludedRows.length === snapshotRows.length;
+  const calculatedExcludedCount = snapshotRows.filter(
+    (item) => item?.status === "Excluded"
+  ).length;
+  const excludedCount =
+    result.excludedCount ?? calculatedExcludedCount;
 
   let bannerClass = "status-warning";
   let heading = "Snapshot creation in progress";
 
-  if (allReturnedRowsExcluded) {
-    bannerClass = "status-warning";
-    heading = "Snapshot request excluded by GxP policy";
-  } else if (status === "Completed") {
+  if (status === "Completed") {
     bannerClass = "status-success";
     heading = "VM snapshots created successfully";
   } else if (status === "PartiallyCompleted") {
@@ -698,6 +724,9 @@ function renderSnapshotStatus(result) {
     heading = excludedCount > 0
       ? "Snapshot request partially completed — GxP exclusions applied"
       : "Snapshot request partially completed";
+  } else if (status === "Excluded") {
+    bannerClass = "status-warning";
+    heading = "Snapshot request excluded by GxP policy";
   } else if (status === "Failed") {
     bannerClass = "status-error";
     heading = "Snapshot request failed";
@@ -786,11 +815,13 @@ function renderSnapshotStatus(result) {
       excludedCount > 0
         ? `
           <div class="information-note">
-            <strong>GxP compliance:</strong>
-            ${escapeHtml(excludedCount)} VM${excludedCount === 1 ? "" : "s"} ${
-              excludedCount === 1 ? "was" : "were"
-            } blocked. The Details column shows the VM/subscription classification
-            and the matched GxP tags returned by Azure Resource Graph.
+            <strong>GxP policy:</strong>
+            ${escapeHtml(excludedCount)} result${
+              Number(excludedCount) === 1 ? "" : "s"
+            } ${
+              Number(excludedCount) === 1 ? "was" : "were"
+            } excluded. The Details column shows the VM/subscription
+            classification and the matching compliance tags.
           </div>`
         : ""
     }
@@ -946,6 +977,7 @@ function showSnapshotResult(result, httpStatus) {
     status: "Submitted",
     successCount: 0,
     failureCount: 0,
+    excludedCount: 0,
     results: []
   });
 
