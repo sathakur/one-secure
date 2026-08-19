@@ -13,6 +13,14 @@ const validationMessage = document.getElementById("validationMessage");
 const submitButton = document.getElementById("submitButton");
 const clearButton = document.getElementById("clearButton");
 const resultArea = document.getElementById("resultArea");
+const suppressionHistoryRefreshButton =
+  document.getElementById("suppressionHistoryRefreshButton");
+const suppressionHistoryMessage =
+  document.getElementById("suppressionHistoryMessage");
+const suppressionHistoryTableArea =
+  document.getElementById("suppressionHistoryTableArea");
+let currentSuppressionHistoryRequests = [];
+
 const authenticatedUserName = document.getElementById("authenticatedUserName");
 const authenticatedProvider = document.getElementById("authenticatedProvider");
 const identityStatus = document.getElementById("identityStatus");
@@ -569,6 +577,7 @@ function snapshotStatusIsTerminal(status) {
   return [
     "Completed",
     "PartiallyCompleted",
+    "Excluded",
     "Failed"
   ].includes(status);
 }
@@ -594,6 +603,28 @@ function buildSnapshotStatusTable(items) {
     return "";
   }
 
+  const formatTagRows = (value) => {
+    if (!Array.isArray(value)) return "";
+
+    return value
+      .map((entry) => {
+        if (!entry) return "";
+
+        if (typeof entry === "string") {
+          return entry.trim();
+        }
+
+        const tagName = String(entry.TagName || entry.tagName || "").trim();
+        const tagValue = String(entry.TagValue || entry.tagValue || "").trim();
+
+        return tagName
+          ? `${tagName} = ${tagValue}`
+          : "";
+      })
+      .filter(Boolean)
+      .join(", ");
+  };
+
   const rows = items
     .map((item) => {
       const diskLabel =
@@ -601,7 +632,50 @@ function buildSnapshotStatusTable(items) {
         item.lun !== undefined &&
         item.lun !== null
           ? `Data (LUN ${item.lun})`
-          : item.diskType || "VM";
+          : item.diskType ||
+            (item.status === "Excluded" ? "Policy" : "VM");
+
+      const positiveVmTags = formatTagRows(item.vmPositiveGxPTags);
+      const negativeVmTags = formatTagRows(item.vmNegativeGxPTags);
+      const positiveSubscriptionTags =
+        formatTagRows(item.subscriptionPositiveGxPTags);
+      const negativeSubscriptionTags =
+        formatTagRows(item.subscriptionNegativeGxPTags);
+
+      const gxpDetails =
+        item.status === "Excluded"
+          ? [
+              `VM classification: ${item.vmGxPStatus || "Unknown"}`,
+              `Subscription classification: ${item.subscriptionGxPStatus || "Unknown"}`,
+              positiveVmTags ? `VM GxP tags: ${positiveVmTags}` : "",
+              negativeVmTags ? `VM Non-GxP tags: ${negativeVmTags}` : "",
+              positiveSubscriptionTags
+                ? `Subscription GxP tags: ${positiveSubscriptionTags}`
+                : "",
+              negativeSubscriptionTags
+                ? `Subscription Non-GxP tags: ${negativeSubscriptionTags}`
+                : ""
+            ]
+              .filter(Boolean)
+              .join(" • ")
+          : "";
+
+      const detailText = [
+        item.message ||
+          item.reason ||
+          formatStatusDetails(item.details) ||
+          "",
+        gxpDetails
+      ]
+        .filter(Boolean)
+        .join(" | ");
+
+      const badgeClass =
+        item.status === "Created"
+          ? "badge-success"
+          : item.status === "Excluded"
+            ? "badge-warning"
+            : "badge-error";
 
       return `
         <tr>
@@ -610,20 +684,11 @@ function buildSnapshotStatusTable(items) {
           <td>${escapeHtml(item.sourceDiskName || "")}</td>
           <td>${escapeHtml(item.snapshotName || "")}</td>
           <td>
-            <span class="badge ${
-              item.status === "Created"
-                ? "badge-success"
-                : "badge-error"
-            }">
+            <span class="badge ${badgeClass}">
               ${escapeHtml(item.status || "Unknown")}
             </span>
           </td>
-          <td>${escapeHtml(
-            item.message ||
-            item.reason ||
-            formatStatusDetails(item.details) ||
-            ""
-          )}</td>
+          <td>${escapeHtml(detailText)}</td>
         </tr>`;
     })
     .join("");
@@ -649,6 +714,12 @@ function buildSnapshotStatusTable(items) {
 
 function renderSnapshotStatus(result) {
   const status = result.status || "Submitted";
+  const snapshotRows = Array.isArray(result.results) ? result.results : [];
+  const calculatedExcludedCount = snapshotRows.filter(
+    (item) => item?.status === "Excluded"
+  ).length;
+  const excludedCount =
+    result.excludedCount ?? calculatedExcludedCount;
 
   let bannerClass = "status-warning";
   let heading = "Snapshot creation in progress";
@@ -658,7 +729,12 @@ function renderSnapshotStatus(result) {
     heading = "VM snapshots created successfully";
   } else if (status === "PartiallyCompleted") {
     bannerClass = "status-warning";
-    heading = "Snapshot request partially completed";
+    heading = excludedCount > 0
+      ? "Snapshot request partially completed — GxP exclusions applied"
+      : "Snapshot request partially completed";
+  } else if (status === "Excluded") {
+    bannerClass = "status-warning";
+    heading = "Snapshot request excluded by GxP policy";
   } else if (status === "Failed") {
     bannerClass = "status-error";
     heading = "Snapshot request failed";
@@ -716,6 +792,10 @@ function renderSnapshotStatus(result) {
         <span>Failures</span>
       </div>
       <div class="summary-item">
+        <strong>${escapeHtml(excludedCount)}</strong>
+        <span>GxP excluded</span>
+      </div>
+      <div class="summary-item">
         <strong>${escapeHtml(
           result.retentionDays
             ? `${result.retentionDays} day${
@@ -736,6 +816,21 @@ function renderSnapshotStatus(result) {
         <span>Expires</span>
       </div>
     </div>`
+        : ""
+    }
+
+    ${
+      excludedCount > 0
+        ? `
+          <div class="information-note">
+            <strong>GxP policy:</strong>
+            ${escapeHtml(excludedCount)} result${
+              Number(excludedCount) === 1 ? "" : "s"
+            } ${
+              Number(excludedCount) === 1 ? "was" : "were"
+            } excluded. The Details column shows the VM/subscription
+            classification and the matching compliance tags.
+          </div>`
         : ""
     }
 
@@ -890,6 +985,7 @@ function showSnapshotResult(result, httpStatus) {
     status: "Submitted",
     successCount: 0,
     failureCount: 0,
+    excludedCount: 0,
     results: []
   });
 
@@ -2485,6 +2581,171 @@ function showBackupResult(
   );
 }
 
+
+function getSuppressionHistoryBadgeClass(status) {
+  if (status === "Created") {
+    return "badge-success";
+  }
+
+  if (
+    status === "PartiallyCreated" ||
+    status === "Excluded"
+  ) {
+    return "badge-warning";
+  }
+
+  return "badge-error";
+}
+
+function renderMySuppressionRequests(requests) {
+  currentSuppressionHistoryRequests =
+    Array.isArray(requests) ? requests : [];
+
+  if (!currentSuppressionHistoryRequests.length) {
+    suppressionHistoryTableArea.innerHTML = `
+      <div class="backup-history-empty">
+        No server-side Alert Suppression request history is available yet.
+      </div>`;
+    return;
+  }
+
+  const rows = currentSuppressionHistoryRequests
+    .map((item) => {
+      const hostnames =
+        Array.isArray(item.hostnames)
+          ? item.hostnames.filter(Boolean)
+          : [];
+
+      return `
+        <tr>
+          <td><code>${escapeHtml(item.requestId || "")}</code></td>
+          <td class="backup-history-vms">${escapeHtml(hostnames.join(", ") || "Not available")}</td>
+          <td>${escapeHtml(item.changeNumber || "Not available")}</td>
+          <td>${escapeHtml(item.startUtc ? formatBackupDateTime(item.startUtc) : item.startDateTime || "-")}</td>
+          <td>${escapeHtml(item.endUtc ? formatBackupDateTime(item.endUtc) : item.endDateTime || "-")}</td>
+          <td>${escapeHtml(formatBackupDateTime(item.submittedUtc))}</td>
+          <td>
+            <span class="badge ${getSuppressionHistoryBadgeClass(item.status || "")}">
+              ${escapeHtml(item.status || "Unknown")}
+            </span>
+          </td>
+          <td>${escapeHtml(item.successCount ?? 0)}</td>
+          <td>${escapeHtml(item.excludedCount ?? 0)}</td>
+          <td>${escapeHtml(item.failureCount ?? 0)}</td>
+          <td class="backup-history-actions">
+            <button
+              type="button"
+              class="secondary suppression-history-view-button"
+              data-request-id="${escapeHtml(item.requestId || "")}">
+              View
+            </button>
+          </td>
+        </tr>`;
+    })
+    .join("");
+
+  suppressionHistoryTableArea.innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Request ID</th>
+            <th>VMs</th>
+            <th>Change / Incident</th>
+            <th>Start</th>
+            <th>End</th>
+            <th>Submitted</th>
+            <th>Status</th>
+            <th>Successful</th>
+            <th>GxP excluded</th>
+            <th>Failed</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+
+  suppressionHistoryTableArea
+    .querySelectorAll(".suppression-history-view-button")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        const requestId = button.dataset.requestId;
+        const selected =
+          currentSuppressionHistoryRequests.find(
+            (item) => item.requestId === requestId
+          );
+
+        if (!selected) {
+          return;
+        }
+
+        showResult(selected, 200);
+        suppressionHistoryMessage.textContent =
+          "Selected Alert Suppression request loaded.";
+      });
+    });
+}
+
+async function loadMySuppressionRequests(showLoading = true) {
+  if (!manualRequester) {
+    return;
+  }
+
+  if (showLoading) {
+    suppressionHistoryMessage.textContent =
+      "Loading your recent Alert Suppression requests…";
+  }
+
+  suppressionHistoryRefreshButton.disabled = true;
+
+  try {
+    const response =
+      await portalFetch(
+        "/api/getMySuppressionRequests?limit=5",
+        {
+          method: "GET",
+          headers: {
+            Accept: "application/json"
+          },
+          cache: "no-store"
+        }
+      );
+
+    if (response.status === 401) {
+      window.location.assign("/");
+      return;
+    }
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      suppressionHistoryMessage.innerHTML = `
+        <span class="backup-history-error">
+          ${escapeHtml(
+            result.message ||
+            "My Alert Suppression Requests could not be loaded."
+          )}
+        </span>`;
+      return;
+    }
+
+    suppressionHistoryMessage.textContent =
+      `Showing ${result.count ?? 0} recent request${result.count === 1 ? "" : "s"}.`;
+
+    renderMySuppressionRequests(result.requests);
+  } catch (error) {
+    suppressionHistoryMessage.innerHTML = `
+      <span class="backup-history-error">
+        ${escapeHtml(
+          `My Alert Suppression Requests could not be loaded: ${error.message}`
+        )}
+      </span>`;
+  } finally {
+    suppressionHistoryRefreshButton.disabled = false;
+  }
+}
+
 function buildSuccessTable(items) {
   if (!Array.isArray(items) || items.length === 0) return "";
 
@@ -2567,6 +2828,112 @@ function buildFailureTable(items) {
     </div>`;
 }
 
+function buildExcludedSuppressionTable(items) {
+  if (!Array.isArray(items) || items.length === 0) return "";
+
+  const formatTagRows = (value) => {
+    if (!Array.isArray(value)) return "";
+
+    return value
+      .map((entry) => {
+        if (!entry) return "";
+
+        if (typeof entry === "string") {
+          return entry.trim();
+        }
+
+        const tagName =
+          String(
+            entry.TagName ||
+            entry.tagName ||
+            ""
+          ).trim();
+
+        const tagValue =
+          String(
+            entry.TagValue ||
+            entry.tagValue ||
+            ""
+          ).trim();
+
+        return tagName
+          ? `${tagName} = ${tagValue}`
+          : "";
+      })
+      .filter(Boolean)
+      .join(", ");
+  };
+
+  const rows = items
+    .map((item) => {
+      const vmPositive =
+        formatTagRows(item.vmPositiveGxPTags);
+
+      const vmNegative =
+        formatTagRows(item.vmNegativeGxPTags);
+
+      const subPositive =
+        formatTagRows(
+          item.subscriptionPositiveGxPTags
+        );
+
+      const subNegative =
+        formatTagRows(
+          item.subscriptionNegativeGxPTags
+        );
+
+      const details = [
+        `VM: ${item.vmGxPStatus || "Unknown"}`,
+        `Subscription: ${item.subscriptionGxPStatus || "Unknown"}`,
+        vmPositive
+          ? `VM GxP tags: ${vmPositive}`
+          : "",
+        vmNegative
+          ? `VM Non-GxP tags: ${vmNegative}`
+          : "",
+        subPositive
+          ? `Subscription GxP tags: ${subPositive}`
+          : "",
+        subNegative
+          ? `Subscription Non-GxP tags: ${subNegative}`
+          : ""
+      ]
+        .filter(Boolean)
+        .join(" • ");
+
+      return `
+        <tr>
+          <td>${escapeHtml(item.hostname || "")}</td>
+          <td>${escapeHtml(item.vmName || "")}</td>
+          <td>${escapeHtml(item.subscriptionName || "")}</td>
+          <td>
+            <span class="badge badge-warning">
+              ${escapeHtml(item.status || "Excluded")}
+            </span>
+          </td>
+          <td>${escapeHtml(details)}</td>
+        </tr>`;
+    })
+    .join("");
+
+  return `
+    <h3>GxP excluded VMs</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Hostname</th>
+            <th>Azure VM</th>
+            <th>Subscription</th>
+            <th>Status</th>
+            <th>GxP details</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
 function showResult(result, httpStatus) {
   let bannerClass = "status-error";
   let heading = "Request failed";
@@ -2577,6 +2944,9 @@ function showResult(result, httpStatus) {
   } else if (result.status === "PartiallyCreated") {
     bannerClass = "status-warning";
     heading = "Request partially completed";
+  } else if (result.status === "Excluded") {
+    bannerClass = "status-warning";
+    heading = "Alert suppression excluded by GxP policy";
   }
 
   resultArea.hidden = false;
@@ -2597,6 +2967,21 @@ function showResult(result, httpStatus) {
       </p>
     </div>
 
+    ${
+      result.changeNumber ||
+      result.startUtc ||
+      result.endUtc ||
+      result.submittedUtc
+        ? `
+          <div class="information-note">
+            ${result.changeNumber ? `<strong>Change / Incident:</strong> ${escapeHtml(result.changeNumber)}<br>` : ""}
+            ${result.startUtc ? `<strong>Start:</strong> ${escapeHtml(formatBackupDateTime(result.startUtc))}<br>` : ""}
+            ${result.endUtc ? `<strong>End:</strong> ${escapeHtml(formatBackupDateTime(result.endUtc))}<br>` : ""}
+            ${result.submittedUtc ? `<strong>Submitted:</strong> ${escapeHtml(formatBackupDateTime(result.submittedUtc))}` : ""}
+          </div>`
+        : ""
+    }
+
     <div class="summary">
       <div class="summary-item">
         <strong>${escapeHtml(result.submittedCount ?? 0)}</strong>
@@ -2611,12 +2996,28 @@ function showResult(result, httpStatus) {
         <span>Successful</span>
       </div>
       <div class="summary-item">
+        <strong>${escapeHtml(result.excludedCount ?? 0)}</strong>
+        <span>GxP excluded</span>
+      </div>
+      <div class="summary-item">
         <strong>${escapeHtml(result.failureCount ?? 0)}</strong>
         <span>Failed</span>
       </div>
     </div>
 
+    ${
+      Number(result.excludedCount ?? 0) > 0
+        ? `
+          <div class="information-note">
+            <strong>GxP compliance gate:</strong>
+            VMs classified as GxP or Conflict, or VMs in a
+            GxP/Conflict subscription, are excluded before APR creation.
+          </div>`
+        : ""
+    }
+
     ${buildSuccessTable(result.successfulResults)}
+    ${buildExcludedSuppressionTable(result.excludedResults)}
     ${buildFailureTable(result.failedResults)}
   `;
 
@@ -4605,6 +5006,10 @@ suppressionTabButton.addEventListener("click", () => {
 backupTabButton.addEventListener("click", () => {
   activateOperationTab("backup");
 
+  loadMySuppressionRequests(
+    false
+  );
+
   loadMyBackupRequests(
     false
   );
@@ -4622,6 +5027,14 @@ backupHostnamesInput.addEventListener(
 backupCheckButton.addEventListener(
   "click",
   checkBackupStatusBeforeSubmit
+);
+
+
+suppressionHistoryRefreshButton?.addEventListener(
+  "click",
+  () => {
+    loadMySuppressionRequests(true);
+  }
 );
 
 backupHistoryRefreshButton.addEventListener(
@@ -4937,6 +5350,11 @@ form.addEventListener("submit", async (event) => {
     }
 
     showResult(result, response.status);
+
+    window.setTimeout(
+      () => loadMySuppressionRequests(false),
+      300
+    );
   } catch (error) {
     showResult(
       {

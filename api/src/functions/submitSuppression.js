@@ -1,4 +1,7 @@
 const { app } = require("@azure/functions");
+const {
+  appendSuppressionRequestHistory
+} = require("../shared/suppressionRequestHistoryStore");
 
 const MAX_HOSTNAMES = 20;
 const FIXED_TIME_ZONE = "W. Europe Standard Time";
@@ -312,6 +315,9 @@ app.http("submitSuppression", {
     const authenticatedRequesterId =
       String(principal.userId).trim();
 
+    const submittedUtc =
+      new Date().toISOString();
+
     const logicAppPayload = {
       hostnames: normalizeHostnames(body.hostnames),
       startDateTime: body.startDateTime.trim(),
@@ -373,9 +379,85 @@ app.http("submitSuppression", {
       };
     }
 
+    const completedUtc =
+      new Date().toISOString();
+
+    let historyTracked = false;
+
+    if (String(responseBody?.requestId || "").trim()) {
+      try {
+        await appendSuppressionRequestHistory(
+          authenticatedRequesterId,
+          {
+            requestId:
+              responseBody.requestId,
+            submittedUtc,
+            completedUtc,
+            hostnames:
+              logicAppPayload.hostnames,
+            changeNumber:
+              logicAppPayload.changeNumber,
+            reason:
+              logicAppPayload.reason,
+            startDateTime:
+              logicAppPayload.startDateTime,
+            endDateTime:
+              logicAppPayload.endDateTime,
+            timeZone:
+              logicAppPayload.timeZone,
+            startUtc:
+              responseBody?.startUtc || "",
+            endUtc:
+              responseBody?.endUtc || "",
+            status:
+              responseBody?.status ||
+              (logicAppResponse.ok
+                ? "Created"
+                : "Failed"),
+            message:
+              responseBody?.message || "",
+            submittedCount:
+              responseBody?.submittedCount ??
+              logicAppPayload.hostnames.length,
+            uniqueCount:
+              responseBody?.uniqueCount ??
+              logicAppPayload.hostnames.length,
+            successCount:
+              responseBody?.successCount ?? 0,
+            failureCount:
+              responseBody?.failureCount ?? 0,
+            excludedCount:
+              responseBody?.excludedCount ?? 0,
+            successfulResults:
+              responseBody?.successfulResults || [],
+            excludedResults:
+              responseBody?.excludedResults || [],
+            failedResults:
+              responseBody?.failedResults || []
+          }
+        );
+
+        historyTracked = true;
+      } catch (error) {
+        context.warn(
+          `Unable to save Alert Suppression request ${responseBody.requestId} to server-side history.`,
+          error
+        );
+      }
+    }
+
     return jsonResponse(
       logicAppResponse.status,
-      responseBody
+      {
+        ...responseBody,
+        submittedUtc,
+        completedUtc,
+        hostnames:
+          logicAppPayload.hostnames,
+        changeNumber:
+          logicAppPayload.changeNumber,
+        historyTracked
+      }
     );
   }
 });

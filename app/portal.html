@@ -86,17 +86,34 @@
 
         <aside class="side-stack">
           <section class="card requirements-panel" aria-labelledby="requirementsHeading">
-            <div class="requirements-heading"><div><span class="requirements-label">Before you submit</span><h2 id="requirementsHeading">Alert suppression requirements</h2></div><span class="requirements-status">3 checks</span></div>
+            <div class="requirements-heading"><div><span class="requirements-label">Before you submit</span><h2 id="requirementsHeading">Alert suppression requirements</h2></div><span class="requirements-status">4 checks</span></div>
             <div class="requirements-grid">
               <article class="requirement-card"><div class="requirement-number">01</div><div><h3>VM scope</h3><p>Enter between 1 and 20 unique VM hostnames.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">02</div><div><h3>Minimum lead time</h3><p>Schedule the start time at least 45 minutes in advance.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">03</div><div><h3>Maximum duration</h3><p>The suppression window must not exceed 24 hours.</p></div></article>
+              <article class="requirement-card"><div class="requirement-number">04</div><div><h3>GxP compliance gate</h3><p>VMs classified as <strong>GxP</strong> or <strong>Conflict</strong>, or VMs inside a GxP/Conflict subscription, are excluded before an Alert Processing Rule is created.</p></div></article>
             </div>
           </section>
-          <section class="policy-card"><div class="policy-title">🛡 Controlled operation</div><p>Requests are associated with the <strong>user name entered on the start page</strong> and processed using least-privilege automation.</p></section>
+          <section class="policy-card"><div class="policy-title">🛡 Controlled operation</div><p>Requests are associated with the <strong>user name entered on the start page</strong>. VM and subscription GxP tags are checked server-side before APR creation, and the compliance check fails closed.</p></section>
         </aside>
       </div>
       <section id="resultArea" class="card result-card" hidden aria-live="polite"></section>
+
+      <section id="suppressionHistoryCard" class="card backup-history-card" aria-labelledby="suppressionHistoryHeading">
+        <div class="backup-history-header">
+          <div>
+            <span class="requirements-label">Server-side request history</span>
+            <h2 id="suppressionHistoryHeading">My Alert Suppression Requests</h2>
+            <p class="field-help">
+              Your latest 5 Alert Suppression requests are stored server-side for the entered user name.
+              When a 6th request is submitted, the oldest entry is removed automatically.
+            </p>
+          </div>
+          <button id="suppressionHistoryRefreshButton" type="button" class="secondary">Refresh</button>
+        </div>
+        <div id="suppressionHistoryMessage" class="field-help" aria-live="polite"></div>
+        <div id="suppressionHistoryTableArea" class="backup-history-table-area"></div>
+      </section>
     </section>
 
     <section id="snapshotPanel" class="operation-panel" role="tabpanel" aria-labelledby="snapshotTabButton" hidden>
@@ -121,15 +138,16 @@
         </section>
         <aside class="side-stack">
           <section class="card requirements-panel" aria-labelledby="snapshotRequirementsHeading">
-            <div class="requirements-heading"><div><span class="requirements-label">Before you submit</span><h2 id="snapshotRequirementsHeading">VM snapshot requirements</h2></div><span class="requirements-status">4 checks</span></div>
+            <div class="requirements-heading"><div><span class="requirements-label">Before you submit</span><h2 id="snapshotRequirementsHeading">VM snapshot requirements</h2></div><span class="requirements-status">5 checks</span></div>
             <div class="requirements-grid snapshot-requirements-grid">
               <article class="requirement-card"><div class="requirement-number">01</div><div><h3>Managed disks</h3><p>The VM OS disk and selected data disks must be Azure managed disks.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">02</div><div><h3>Snapshot scope</h3><p>Select the OS disk only or the OS disk and all attached data disks.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">03</div><div><h3>VM request limit</h3><p>A single snapshot request can contain a maximum of 5 unique VM hostnames.</p></div></article>
               <article class="requirement-card"><div class="requirement-number">04</div><div><h3>User request quota</h3><p>Each entered user name can submit up to 3 snapshot requests in any rolling 24-hour period.</p></div></article>
+              <article class="requirement-card"><div class="requirement-number">05</div><div><h3>GxP compliance gate</h3><p>The server-side Snapshot Logic App reads VM and subscription tags. <strong>GxP</strong> and <strong>Conflict</strong> classifications are excluded before snapshot creation.</p></div></article>
             </div>
           </section>
-          <section class="policy-card"><div class="policy-title">🛡 Recovery-point policy</div><p>Retention and expiry metadata remain unchanged. This redesign affects presentation only.</p></section>
+          <section class="policy-card"><div class="policy-title">🛡 Recovery-point &amp; GxP policy</div><p>GxP validation is enforced server-side at both VM and subscription level. If the tag inventory query fails, snapshot creation is blocked by fail-closed policy.</p></section>
         </aside>
       </div>
       <section id="snapshotResultArea" class="card result-card" hidden aria-live="polite"></section>
@@ -216,6 +234,6 @@
 
     <footer class="portal-footer"><span>Azure VM Operations Portal</span><span>Enterprise self-service • Manual requester identification</span></footer>
   </main>
-  <script src="/app.js?v=20260819-vm-health-v2734-cpu-history-24h"></script>
+  <script src="/app.js?v=20260819-apr-gxp-history-final"></script>
 </body>
 </html>
