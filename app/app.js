@@ -569,7 +569,6 @@ function snapshotStatusIsTerminal(status) {
   return [
     "Completed",
     "PartiallyCompleted",
-    "Excluded",
     "Failed"
   ].includes(status);
 }
@@ -595,28 +594,6 @@ function buildSnapshotStatusTable(items) {
     return "";
   }
 
-  const formatTagRows = (value) => {
-    if (!Array.isArray(value)) return "";
-
-    return value
-      .map((entry) => {
-        if (!entry) return "";
-
-        if (typeof entry === "string") {
-          return entry.trim();
-        }
-
-        const tagName = String(entry.TagName || entry.tagName || "").trim();
-        const tagValue = String(entry.TagValue || entry.tagValue || "").trim();
-
-        return tagName
-          ? `${tagName} = ${tagValue}`
-          : "";
-      })
-      .filter(Boolean)
-      .join(", ");
-  };
-
   const rows = items
     .map((item) => {
       const diskLabel =
@@ -624,50 +601,7 @@ function buildSnapshotStatusTable(items) {
         item.lun !== undefined &&
         item.lun !== null
           ? `Data (LUN ${item.lun})`
-          : item.diskType ||
-            (item.status === "Excluded" ? "Policy" : "VM");
-
-      const positiveVmTags = formatTagRows(item.vmPositiveGxPTags);
-      const negativeVmTags = formatTagRows(item.vmNegativeGxPTags);
-      const positiveSubscriptionTags =
-        formatTagRows(item.subscriptionPositiveGxPTags);
-      const negativeSubscriptionTags =
-        formatTagRows(item.subscriptionNegativeGxPTags);
-
-      const gxpDetails =
-        item.status === "Excluded"
-          ? [
-              `VM classification: ${item.vmGxPStatus || "Unknown"}`,
-              `Subscription classification: ${item.subscriptionGxPStatus || "Unknown"}`,
-              positiveVmTags ? `VM GxP tags: ${positiveVmTags}` : "",
-              negativeVmTags ? `VM Non-GxP tags: ${negativeVmTags}` : "",
-              positiveSubscriptionTags
-                ? `Subscription GxP tags: ${positiveSubscriptionTags}`
-                : "",
-              negativeSubscriptionTags
-                ? `Subscription Non-GxP tags: ${negativeSubscriptionTags}`
-                : ""
-            ]
-              .filter(Boolean)
-              .join(" • ")
-          : "";
-
-      const detailText = [
-        item.message ||
-          item.reason ||
-          formatStatusDetails(item.details) ||
-          "",
-        gxpDetails
-      ]
-        .filter(Boolean)
-        .join(" | ");
-
-      const badgeClass =
-        item.status === "Created"
-          ? "badge-success"
-          : item.status === "Excluded"
-            ? "badge-warning"
-            : "badge-error";
+          : item.diskType || "VM";
 
       return `
         <tr>
@@ -676,11 +610,20 @@ function buildSnapshotStatusTable(items) {
           <td>${escapeHtml(item.sourceDiskName || "")}</td>
           <td>${escapeHtml(item.snapshotName || "")}</td>
           <td>
-            <span class="badge ${badgeClass}">
+            <span class="badge ${
+              item.status === "Created"
+                ? "badge-success"
+                : "badge-error"
+            }">
               ${escapeHtml(item.status || "Unknown")}
             </span>
           </td>
-          <td>${escapeHtml(detailText)}</td>
+          <td>${escapeHtml(
+            item.message ||
+            item.reason ||
+            formatStatusDetails(item.details) ||
+            ""
+          )}</td>
         </tr>`;
     })
     .join("");
@@ -706,12 +649,6 @@ function buildSnapshotStatusTable(items) {
 
 function renderSnapshotStatus(result) {
   const status = result.status || "Submitted";
-  const snapshotRows = Array.isArray(result.results) ? result.results : [];
-  const calculatedExcludedCount = snapshotRows.filter(
-    (item) => item?.status === "Excluded"
-  ).length;
-  const excludedCount =
-    result.excludedCount ?? calculatedExcludedCount;
 
   let bannerClass = "status-warning";
   let heading = "Snapshot creation in progress";
@@ -721,12 +658,7 @@ function renderSnapshotStatus(result) {
     heading = "VM snapshots created successfully";
   } else if (status === "PartiallyCompleted") {
     bannerClass = "status-warning";
-    heading = excludedCount > 0
-      ? "Snapshot request partially completed — GxP exclusions applied"
-      : "Snapshot request partially completed";
-  } else if (status === "Excluded") {
-    bannerClass = "status-warning";
-    heading = "Snapshot request excluded by GxP policy";
+    heading = "Snapshot request partially completed";
   } else if (status === "Failed") {
     bannerClass = "status-error";
     heading = "Snapshot request failed";
@@ -784,10 +716,6 @@ function renderSnapshotStatus(result) {
         <span>Failures</span>
       </div>
       <div class="summary-item">
-        <strong>${escapeHtml(excludedCount)}</strong>
-        <span>GxP excluded</span>
-      </div>
-      <div class="summary-item">
         <strong>${escapeHtml(
           result.retentionDays
             ? `${result.retentionDays} day${
@@ -808,21 +736,6 @@ function renderSnapshotStatus(result) {
         <span>Expires</span>
       </div>
     </div>`
-        : ""
-    }
-
-    ${
-      excludedCount > 0
-        ? `
-          <div class="information-note">
-            <strong>GxP policy:</strong>
-            ${escapeHtml(excludedCount)} result${
-              Number(excludedCount) === 1 ? "" : "s"
-            } ${
-              Number(excludedCount) === 1 ? "was" : "were"
-            } excluded. The Details column shows the VM/subscription
-            classification and the matching compliance tags.
-          </div>`
         : ""
     }
 
@@ -977,7 +890,6 @@ function showSnapshotResult(result, httpStatus) {
     status: "Submitted",
     successCount: 0,
     failureCount: 0,
-    excludedCount: 0,
     results: []
   });
 
@@ -3746,7 +3658,7 @@ function healthCopyText(result) {
   const memoryMb = healthFiniteNumber(hardware.memoryMB);
   const memoryGb = memoryMb === null ? null : memoryMb / 1024;
   return [
-    `VM Health Diagnostic V2.7.3.2`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
+    `VM Health Diagnostic V2.7.3.4`, `VM: ${result?.hostname || vm.VMName || "Unknown"}`, `Overall: ${v.overall}`,
     `Power: ${v.powerState}`, `Resource Health: ${v.resourceHealth}`, `Active alerts: ${v.alerts.length}`,
     `CPU avg/max: ${healthIsRunning(v.powerState) ? `${healthFormatPercent(v.platform.cpu.average)} / ${healthFormatPercent(v.platform.cpu.maximum)}` : "N/A - VM not running"}`,
     `vCPUs: ${vCpuCount === null ? "Unknown" : healthFormatNumber(vCpuCount, 0)}`,
@@ -4080,7 +3992,7 @@ function healthDownloadPdfReport(result) {
       </div>
       <div class="health-pdf-meta">
         <div><strong>Generated:</strong> ${escapeHtml(generatedDisplay)}</div>
-        <div><strong>Portal:</strong> VM Health Diagnostic V2.7.3.2</div>
+        <div><strong>Portal:</strong> VM Health Diagnostic V2.7.3.4</div>
       </div>
     </header>
 
@@ -4190,7 +4102,7 @@ function healthBuildVmCard(result, index) {
     ? `<span class="health-disk-system-note">${escapeHtml(`${systemVolumeDisks.length} system volume${systemVolumeDisks.length === 1 ? "" : "s"} available in details`)}</span>`
     : "";
 
-  const findingsHtml = view.findings.length ? `<ul>${view.findings.map((finding) => `<li class="health-finding-${finding.severity.toLowerCase()}"><strong>${escapeHtml(finding.severity)}:</strong> ${escapeHtml(finding.message)}</li>`).join("")}</ul>` : '<div class="health-empty">No warning or critical findings were identified by the configured V2.7.3.2 rules.</div>';
+  const findingsHtml = view.findings.length ? `<ul>${view.findings.map((finding) => `<li class="health-finding-${finding.severity.toLowerCase()}"><strong>${escapeHtml(finding.severity)}:</strong> ${escapeHtml(finding.message)}</li>`).join("")}</ul>` : '<div class="health-empty">No warning or critical findings were identified by the configured V2.7.3.4 rules.</div>';
 
   const guestDiskTable = healthBuildMiniTable([
     { label: "Drive / mount", value: (r) => r.instance },
@@ -4266,7 +4178,7 @@ function healthBuildVmCard(result, index) {
     { label: "Peak time", value: (r) => healthFormatDateTime(r.peakTime) }
   ], processHistory.memory);
   const processHistoryHtml = processHistory.available
-    ? `<div class="health-consumer-grid"><section class="health-consumer-card"><h5>Historical CPU consumers — 1h / 5h / 24h</h5>${historicalCpuTable}</section><section class="health-consumer-card"><h5>Historical memory consumers — 1h / 5h / 24h</h5>${historicalMemoryTable}</section></div>`
+    ? `<div class="health-consumer-grid"><section class="health-consumer-card"><h5>Historical CPU consumers — 24h</h5>${historicalCpuTable}</section><section class="health-consumer-card"><h5>Historical memory consumers — 1h / 5h / 24h</h5>${historicalMemoryTable}</section></div>`
     : '<div class="health-note">Historical process data is unavailable. History starts only after the Process(*) counters are collected into Log Analytics; existing CPU/RAM VM-level metrics cannot reconstruct past per-process usage.</div>';
 
   // Guest identity diagnostics remain in the JSON result.
@@ -4422,7 +4334,7 @@ function healthBuildVmCard(result, index) {
 
       <div class="health-details">
         <details><summary>VM configuration &amp; runtime</summary><div class="health-details-body">${healthBuildConfiguration(result, view)}</div></details>
-        <details><summary>Performance</summary><div class="health-details-body"><div class="health-metric-grid"><div class="health-metric-box"><span>CPU average</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.average))}</strong></div><div class="health-metric-box"><span>CPU maximum</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</strong></div><div class="health-metric-box"><span>CPU latest</span><strong>${escapeHtml(spikes.cpu.available ? healthFormatPercent(spikes.cpu.current) : runtimeMetric(view.platform.cpu.latest))}</strong></div><div class="health-metric-box"><span>RAM used latest</span><strong>${escapeHtml(ramUsedDisplay)}</strong></div><div class="health-metric-box"><span>Network in</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Network out</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Period</span><strong>${escapeHtml(`${result?.periodMinutes || ""} min`)}</strong></div></div><h4 class="health-section-heading">CPU / RAM spike analysis</h4><p class="health-inline-note">CPU spike threshold: 85%. RAM-used spike threshold: 90%. CPU uses Azure platform 1-minute metrics; RAM uses the effective Log Analytics workspace (Perf preferred, VM Insights fallback).</p>${spikeTable}${spikeChartsHtml}<h4 class="health-section-heading">Top CPU / memory consumers</h4><p class="health-inline-note">Top 3 process/service-host instances from the last 30 minutes. CPU is normalized by VM vCPU count; memory is private working set. Requires Process(*) counters in the effective DCR.</p>${processConsumersHtml}<h4 class="health-section-heading">Historical process consumption</h4><p class="health-inline-note">Top 3 historical process/service-host consumers for the last 1 hour, 5 hours and 24 hours. Ranking is by peak usage; average and exact peak time are also shown.</p>${processHistoryHtml}<h4 class="health-section-heading">Data freshness</h4>${freshnessTable}</div></details>
+        <details><summary>Performance</summary><div class="health-details-body"><div class="health-metric-grid"><div class="health-metric-box"><span>CPU average</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.average))}</strong></div><div class="health-metric-box"><span>CPU maximum</span><strong>${escapeHtml(runtimeMetric(view.platform.cpu.maximum))}</strong></div><div class="health-metric-box"><span>CPU latest</span><strong>${escapeHtml(spikes.cpu.available ? healthFormatPercent(spikes.cpu.current) : runtimeMetric(view.platform.cpu.latest))}</strong></div><div class="health-metric-box"><span>RAM used latest</span><strong>${escapeHtml(ramUsedDisplay)}</strong></div><div class="health-metric-box"><span>Network in</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkIn.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Network out</span><strong>${escapeHtml(running ? healthFormatBytes(view.platform.networkOut.total) : "N/A")}</strong></div><div class="health-metric-box"><span>Period</span><strong>${escapeHtml(`${result?.periodMinutes || ""} min`)}</strong></div></div><h4 class="health-section-heading">CPU / RAM spike analysis</h4><p class="health-inline-note">CPU spike threshold: 85%. RAM-used spike threshold: 90%. CPU uses Azure platform 1-minute metrics; RAM uses the effective Log Analytics workspace (Perf preferred, VM Insights fallback).</p>${spikeTable}${spikeChartsHtml}<h4 class="health-section-heading">Top CPU / memory consumers</h4><p class="health-inline-note">Top 3 process/service-host instances from the last 30 minutes. CPU is normalized by VM vCPU count; memory is private working set. Requires Process(*) counters in the effective DCR.</p>${processConsumersHtml}<h4 class="health-section-heading">Historical process consumption</h4><p class="health-inline-note">Historical CPU consumers are shown for the last 24 hours only. Historical memory consumers remain available for 1 hour, 5 hours and 24 hours. Ranking is by peak usage; average and exact peak time are also shown.</p>${processHistoryHtml}<h4 class="health-section-heading">Data freshness</h4>${freshnessTable}</div></details>
         <details><summary>Storage &amp; disk performance</summary><div class="health-details-body"><h4 class="health-section-heading">Azure managed disks</h4>${managedDiskTable}<h4 class="health-section-heading">Guest logical disks</h4>${guestDiskTable}<h4 class="health-section-heading">Platform disk performance</h4>${diskPerfTable}</div></details>
         <details><summary>Network &amp; security configuration</summary><div class="health-details-body"><h4 class="health-section-heading">NIC configuration</h4>${networkTable}<h4 class="health-section-heading">Effective network security groups</h4>${nsgTable}</div></details>
         <details><summary>Azure alerts &amp; recent changes</summary><div class="health-details-body"><h4 class="health-section-heading">Active fired alerts</h4>${alertTable}<h4 class="health-section-heading">Azure Activity Log - last 24 hours</h4>${activityTable}</div></details>
