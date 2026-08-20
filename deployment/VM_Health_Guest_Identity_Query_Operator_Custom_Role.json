@@ -1,0 +1,33 @@
+{
+  "properties": {
+    "roleName": "VM Health Guest Identity Query Operator",
+    "description": "Allows only Azure VM action Run Command for the VM Health diagnostic to execute the supplied read-only Win32_ComputerSystem identity query. Does not grant start, stop, restart, delete, disk, network, patch, or backup modification permissions.",
+    "assignableScopes": [
+      "/subscriptions/<TARGET-SUBSCRIPTION-ID>"
+    ],
+    "permissions": [
+      {
+        "actions": [
+          "Microsoft.Compute/virtualMachines/runCommand/action"
+        ],
+        "notActions": [
+          "Microsoft.Compute/virtualMachines/write",
+          "Microsoft.Compute/virtualMachines/delete",
+          "Microsoft.Compute/virtualMachines/restart/action",
+          "Microsoft.Compute/virtualMachines/start/action",
+          "Microsoft.Compute/virtualMachines/powerOff/action",
+          "Microsoft.Compute/virtualMachines/deallocate/action",
+          "Microsoft.Compute/virtualMachines/installPatches/action",
+          "Microsoft.Compute/disks/write",
+          "Microsoft.Compute/disks/delete",
+          "Microsoft.Network/networkInterfaces/write",
+          "Microsoft.Network/networkSecurityGroups/write",
+          "Microsoft.Authorization/roleAssignments/write",
+          "Microsoft.Authorization/roleDefinitions/write"
+        ],
+        "dataActions": [],
+        "notDataActions": []
+      }
+    ]
+  }
+}

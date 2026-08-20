@@ -1,0 +1,24 @@
+{
+  "note": "MERGE this data source into the existing approved DCR. It is not a complete deployable DCR because destinations/dataFlows are environment-specific. Process(*) counters increase ingestion volume; validate cost in non-production first.",
+  "dataSources": {
+    "performanceCounters": [
+      {
+        "name": "vmHealthV272WindowsPerf60s",
+        "streams": [
+          "Microsoft-Perf"
+        ],
+        "samplingFrequencyInSeconds": 60,
+        "counterSpecifiers": [
+          "\\\\Processor(_Total)\\\\% Processor Time",
+          "\\\\Memory\\\\Available MBytes",
+          "\\\\Memory\\\\% Committed Bytes In Use",
+          "\\\\LogicalDisk(*)\\\\% Free Space",
+          "\\\\LogicalDisk(*)\\\\Free Megabytes",
+          "\\\\Process(*)\\\\% Processor Time",
+          "\\\\Process(*)\\\\Working Set - Private",
+          "\\\\Process(*)\\\\ID Process"
+        ]
+      }
+    ]
+  }
+}

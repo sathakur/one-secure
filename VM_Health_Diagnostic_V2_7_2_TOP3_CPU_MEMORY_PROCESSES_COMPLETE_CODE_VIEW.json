@@ -1,0 +1,1815 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "2.7.2.0",
+    "triggers": {
+      "When_an_HTTP_request_is_received": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "requestId": {
+                "type": "string"
+              },
+              "submittedUtc": {
+                "type": "string"
+              },
+              "hostnames": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "maxItems": 1
+              },
+              "periodMinutes": {
+                "type": "integer"
+              },
+              "statusBlobUrl": {
+                "type": "string"
+              },
+              "requesterUserName": {
+                "type": "string"
+              },
+              "requesterUserId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "requestId",
+              "submittedUtc",
+              "hostnames",
+              "periodMinutes",
+              "statusBlobUrl",
+              "requesterUserName",
+              "requesterUserId"
+            ]
+          }
+        }
+      }
+    },
+    "actions": {
+      "Request_ID": {
+        "type": "Compose",
+        "inputs": "@toLower(triggerBody()?['requestId'])"
+      },
+      "Distinct_Hostnames": {
+        "runAfter": {
+          "Request_ID": [
+            "Succeeded"
+          ]
+        },
+        "type": "Compose",
+        "inputs": "@union(triggerBody()?['hostnames'],triggerBody()?['hostnames'])"
+      },
+      "Initialize_Health_Results": {
+        "runAfter": {
+          "Distinct_Hostnames": [
+            "Succeeded"
+          ]
+        },
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "HealthResults",
+              "type": "array",
+              "value": []
+            }
+          ]
+        }
+      },
+      "Write_Processing_Status": {
+        "runAfter": {
+          "Initialize_Health_Results": [
+            "Succeeded"
+          ]
+        },
+        "type": "Http",
+        "inputs": {
+          "uri": "@triggerBody()?['statusBlobUrl']",
+          "method": "PUT",
+          "headers": {
+            "x-ms-blob-type": "BlockBlob",
+            "x-ms-version": "2023-11-03",
+            "x-ms-date": "@formatDateTime(utcNow(),'R')",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "requestId": "@outputs('Request_ID')",
+            "requesterUserId": "@triggerBody()?['requesterUserId']",
+            "requesterUserName": "@triggerBody()?['requesterUserName']",
+            "status": "Processing",
+            "message": "Azure VM health checks are running for the requested VM. No remediation changes are performed.",
+            "submittedUtc": "@triggerBody()?['submittedUtc']",
+            "completedUtc": null,
+            "periodMinutes": "@int(triggerBody()?['periodMinutes'])",
+            "submittedCount": "@length(outputs('Distinct_Hostnames'))",
+            "successCount": 0,
+            "warningCount": 0,
+            "failureCount": 0,
+            "results": []
+          },
+          "authentication": {
+            "type": "ManagedServiceIdentity",
+            "audience": "https://storage.azure.com/"
+          }
+        }
+      },
+      "Acknowledge_Request": {
+        "runAfter": {
+          "Write_Processing_Status": [
+            "Succeeded"
+          ]
+        },
+        "type": "Response",
+        "kind": "Http",
+        "inputs": {
+          "statusCode": 202,
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "accepted": true,
+            "requestId": "@outputs('Request_ID')"
+          }
+        }
+      },
+      "Request_Is_Valid": {
+        "runAfter": {
+          "Acknowledge_Request": [
+            "Succeeded"
+          ]
+        },
+        "type": "Compose",
+        "inputs": "@and(greaterOrEquals(length(outputs('Distinct_Hostnames')),1),lessOrEquals(length(outputs('Distinct_Hostnames')),parameters('maximumHostnames')),contains(createArray(60,180,360,1440),int(triggerBody()?['periodMinutes'])),not(equals(trim(coalesce(triggerBody()?['requesterUserId'],'')),'')))"
+      },
+      "For_Each_Hostname": {
+        "foreach": "@if(outputs('Request_Is_Valid'),outputs('Distinct_Hostnames'),json('[]'))",
+        "actions": {
+          "Normalize_Current_Hostname": {
+            "type": "Compose",
+            "inputs": "@toUpper(trim(item()))"
+          },
+          "VM_Result_Blob_URL": {
+            "runAfter": {
+              "Normalize_Current_Hostname": [
+                "Succeeded"
+              ]
+            },
+            "type": "Compose",
+            "inputs": "@concat(substring(triggerBody()?['statusBlobUrl'],0,lastIndexOf(triggerBody()?['statusBlobUrl'],'/')),'/health-parallel-results/',outputs('Request_ID'),'/',toLower(outputs('Normalize_Current_Hostname')),'.json')"
+          },
+          "Query_VM_Resource_Graph": {
+            "runAfter": {
+              "VM_Result_Blob_URL": [
+                "Succeeded"
+              ]
+            },
+            "type": "Http",
+            "inputs": {
+              "uri": "@concat('https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=',parameters('resourceGraphApiVersion'))",
+              "method": "POST",
+              "headers": {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+              },
+              "authentication": {
+                "type": "ManagedServiceIdentity",
+                "audience": "https://management.azure.com/"
+              },
+              "body": {
+                "query": "@concat('Resources | where type =~ ''microsoft.compute/virtualmachines'' | extend OSHostName=tostring(properties.osProfile.computerName) | extend ShortOSHostName=tostring(split(OSHostName,''.'')[0]) | where toupper(name) == ''',outputs('Normalize_Current_Hostname'),''' or toupper(OSHostName) == ''',outputs('Normalize_Current_Hostname'),''' or toupper(ShortOSHostName) == ''',outputs('Normalize_Current_Hostname'),''' | join kind=leftouter (ResourceContainers | where type =~ ''microsoft.resources/subscriptions'' | project subscriptionId, SubscriptionName=name) on subscriptionId | project Hostname=OSHostName, VMName=name, SubscriptionId=subscriptionId, SubscriptionName, ResourceGroup=resourceGroup, Location=location, ResourceId=id, VMSize=tostring(properties.hardwareProfile.vmSize), OSType=tostring(properties.storageProfile.osDisk.osType), ComputerName=tostring(properties.osProfile.computerName), SecurityType=tostring(properties.securityProfile.securityType), IdentityType=tostring(identity.type), BootDiagnosticsEnabled=tobool(properties.diagnosticsProfile.bootDiagnostics.enabled), Tags=tags')",
+                "options": {
+                  "resultFormat": "objectArray"
+                }
+              }
+            }
+          },
+          "Exactly_One_VM_Found": {
+            "actions": {
+              "VM_Record": {
+                "type": "Compose",
+                "inputs": "@first(body('Query_VM_Resource_Graph')?['data'])"
+              },
+              "Get_Instance_View": {
+                "runAfter": {
+                  "VM_Hardware_Profile": [
+                    "Succeeded"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com',outputs('VM_Record')?['ResourceId'],'/instanceView?api-version=',parameters('computeApiVersion'))",
+                  "method": "GET",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "Get_Resource_Health": {
+                "runAfter": {
+                  "Get_Instance_View": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com',outputs('VM_Record')?['ResourceId'],'/providers/Microsoft.ResourceHealth/availabilityStatuses/current?api-version=',parameters('resourceHealthApiVersion'),'&$expand=recommendedactions')",
+                  "method": "GET",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "Get_Resource_Health_History": {
+                "runAfter": {
+                  "Get_Resource_Health": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com',outputs('VM_Record')?['ResourceId'],'/providers/Microsoft.ResourceHealth/availabilityStatuses?api-version=',parameters('resourceHealthApiVersion'),'&$expand=recommendedactions')",
+                  "method": "GET",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "Get_Active_Alerts": {
+                "runAfter": {
+                  "Get_Resource_Health_History": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com/subscriptions/',outputs('VM_Record')?['SubscriptionId'],'/providers/Microsoft.AlertsManagement/alerts?targetResource=',uriComponent(outputs('VM_Record')?['ResourceId']),'&monitorCondition=Fired&timeRange=1d&pageCount=50&sortBy=lastModifiedDateTime&sortOrder=desc&api-version=',parameters('alertsManagementApiVersion'))",
+                  "method": "GET",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "Get_Recent_Activity": {
+                "runAfter": {
+                  "Get_Active_Alerts": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com/subscriptions/',outputs('VM_Record')?['SubscriptionId'],'/providers/Microsoft.Insights/eventtypes/management/values?api-version=',parameters('activityLogApiVersion'),'&$filter=',uriComponent(concat('eventTimestamp ge ''',formatDateTime(addHours(utcNow(),-24),'yyyy-MM-ddTHH:mm:ssZ'),''' and eventTimestamp le ''',formatDateTime(utcNow(),'yyyy-MM-ddTHH:mm:ssZ'),''' and resourceUri eq ''',outputs('VM_Record')?['ResourceId'],'''')),'&$select=authorization,claims,correlationId,description,eventName,eventTimestamp,level,operationName,resourceGroupName,resourceId,status,submissionTimestamp,subscriptionId')",
+                  "method": "GET",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "Get_Platform_Metrics": {
+                "runAfter": {
+                  "Get_Recent_Activity": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com',outputs('VM_Record')?['ResourceId'],'/providers/Microsoft.Insights/metrics?api-version=',parameters('metricsApiVersion'),'&timespan=',formatDateTime(addMinutes(utcNow(),mul(-1,int(triggerBody()?['periodMinutes']))),'yyyy-MM-ddTHH:mm:ssZ'),'/',formatDateTime(utcNow(),'yyyy-MM-ddTHH:mm:ssZ'),'&interval=PT5M&metricnames=Percentage%20CPU,Disk%20Read%20Operations%2FSec,Disk%20Write%20Operations%2FSec,OS%20Disk%20IOPS%20Consumed%20Percentage,OS%20Disk%20Bandwidth%20Consumed%20Percentage,OS%20Disk%20Latency,Data%20Disk%20IOPS%20Consumed%20Percentage,Data%20Disk%20Bandwidth%20Consumed%20Percentage,Data%20Disk%20Latency&aggregation=Average%2CMaximum')",
+                  "method": "GET",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "Get_Platform_Transfer_Metrics": {
+                "runAfter": {
+                  "Get_CPU_Spike_Metrics_24H": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com',outputs('VM_Record')?['ResourceId'],'/providers/Microsoft.Insights/metrics?api-version=',parameters('metricsApiVersion'),'&timespan=',formatDateTime(addMinutes(utcNow(),mul(-1,int(triggerBody()?['periodMinutes']))),'yyyy-MM-ddTHH:mm:ssZ'),'/',formatDateTime(utcNow(),'yyyy-MM-ddTHH:mm:ssZ'),'&interval=PT5M&metricnames=Network%20In%20Total,Network%20Out%20Total,Disk%20Read%20Bytes,Disk%20Write%20Bytes&aggregation=Total')",
+                  "method": "GET",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "List_VM_Extensions": {
+                "runAfter": {
+                  "Get_Platform_Transfer_Metrics": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com',outputs('VM_Record')?['ResourceId'],'/extensions?api-version=',parameters('computeApiVersion'),'&$expand=instanceView')",
+                  "method": "GET",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "List_DCR_Associations": {
+                "runAfter": {
+                  "List_VM_Extensions": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com',outputs('VM_Record')?['ResourceId'],'/providers/Microsoft.Insights/dataCollectionRuleAssociations?api-version=',parameters('dcrApiVersion'))",
+                  "method": "GET",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "Get_Backup_Protection_Status": {
+                "runAfter": {
+                  "List_DCR_Associations": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com/subscriptions/',outputs('VM_Record')?['SubscriptionId'],'/providers/Microsoft.RecoveryServices/locations/',outputs('VM_Record')?['Location'],'/backupStatus?api-version=',parameters('backupApiVersion'))",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  },
+                  "body": {
+                    "resourceId": "@outputs('VM_Record')?['ResourceId']",
+                    "resourceType": "VM"
+                  }
+                }
+              },
+              "Query_Backup_Protected_Item": {
+                "runAfter": {
+                  "Get_Backup_Protection_Status": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=',parameters('resourceGraphApiVersion'))",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  },
+                  "body": {
+                    "query": "@concat('RecoveryServicesResources | where type =~ ''microsoft.recoveryservices/vaults/backupfabrics/protectioncontainers/protecteditems'' | extend SourceResourceId=tostring(properties.sourceResourceId) | where tolower(SourceResourceId) == tolower(''',outputs('VM_Record')?['ResourceId'],''') | project Name=name, VaultId=tostring(properties.vaultId), PolicyName=tostring(properties.policyName), ProtectionStatus=tostring(properties.protectionStatus), ProtectionState=tostring(properties.protectionState), HealthStatus=tostring(properties.healthStatus), LastBackupStatus=tostring(properties.lastBackupStatus), LastBackupTime=tostring(properties.lastBackupTime), LastRecoveryPoint=tostring(properties.lastRecoveryPoint), SourceResourceId')",
+                    "options": {
+                      "resultFormat": "objectArray"
+                    }
+                  }
+                }
+              },
+              "Query_Attached_Disks": {
+                "runAfter": {
+                  "Query_Backup_Protected_Item": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=',parameters('resourceGraphApiVersion'))",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  },
+                  "body": {
+                    "query": "@concat('Resources | where type =~ ''microsoft.compute/disks'' | where tolower(tostring(managedBy)) == tolower(''',outputs('VM_Record')?['ResourceId'],''') | project Name=name, ResourceId=id, ResourceGroup=resourceGroup, Location=location, SizeGB=toint(properties.diskSizeGB), Sku=tostring(sku.name), DiskState=tostring(properties.diskState), EncryptionType=tostring(properties.encryption.type), NetworkAccessPolicy=tostring(properties.networkAccessPolicy)')",
+                    "options": {
+                      "resultFormat": "objectArray"
+                    }
+                  }
+                }
+              },
+              "Query_Network_Interfaces": {
+                "runAfter": {
+                  "Query_Attached_Disks": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=',parameters('resourceGraphApiVersion'))",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  },
+                  "body": {
+                    "query": "@concat('Resources | where type =~ ''microsoft.network/networkinterfaces'' | where tolower(tostring(properties.virtualMachine.id)) == tolower(''',outputs('VM_Record')?['ResourceId'],''') | mv-expand IpConfig=properties.ipConfigurations | project Name=name, ResourceId=id, PrivateIp=tostring(IpConfig.properties.privateIPAddress), PrivateIpAllocation=tostring(IpConfig.properties.privateIPAllocationMethod), SubnetId=tostring(IpConfig.properties.subnet.id), NSGId=tostring(properties.networkSecurityGroup.id), AcceleratedNetworking=tobool(properties.enableAcceleratedNetworking), IPForwarding=tobool(properties.enableIPForwarding)')",
+                    "options": {
+                      "resultFormat": "objectArray"
+                    }
+                  }
+                }
+              },
+              "Primary_NIC_Record": {
+                "runAfter": {
+                  "Query_Network_Interfaces": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Compose",
+                "inputs": "@if(greater(length(coalesce(body('Query_Network_Interfaces')?['data'],json('[]'))),0),first(body('Query_Network_Interfaces')?['data']),json('{}'))"
+              },
+              "Get_Effective_NSGs": {
+                "runAfter": {
+                  "Primary_NIC_Record": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com',outputs('Primary_NIC_Record')?['ResourceId'],'/effectiveNetworkSecurityGroups?api-version=',parameters('networkApiVersion'))",
+                  "method": "POST",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "Query_Patch_Assessment": {
+                "runAfter": {
+                  "Get_Effective_NSGs": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=',parameters('resourceGraphApiVersion'))",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  },
+                  "body": {
+                    "query": "@concat('PatchAssessmentResources | where tolower(id) == strcat(tolower(''',outputs('VM_Record')?['ResourceId'],'''), ''/patchassessmentresults/latest'') | project AssessmentId=id, AssessmentName=name, Properties=properties')",
+                    "options": {
+                      "resultFormat": "objectArray"
+                    }
+                  }
+                }
+              },
+              "Select_Regional_LAW_Name": {
+                "runAfter": {
+                  "Query_Patch_Assessment": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Compose",
+                "inputs": "@if(equals(toLower(outputs('VM_Record')?['Location']),'westeurope'),parameters('westEuropeLawName'),'')"
+              },
+              "Query_Regional_LAW_Resource_Graph": {
+                "runAfter": {
+                  "Select_Regional_LAW_Name": [
+                    "Succeeded"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=',parameters('resourceGraphApiVersion'))",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  },
+                  "body": {
+                    "query": "@concat('Resources | where type =~ ''microsoft.operationalinsights/workspaces'' | where tolower(name) == tolower(''',outputs('Select_Regional_LAW_Name'),''') | project WorkspaceName=name, WorkspaceId=tostring(properties.customerId), WorkspaceResourceId=id, WorkspaceSubscriptionId=subscriptionId, WorkspaceResourceGroup=resourceGroup, WorkspaceLocation=location | where isnotempty(WorkspaceId) | take 1')",
+                    "options": {
+                      "resultFormat": "objectArray"
+                    }
+                  }
+                }
+              },
+              "Regional_LAW_Record": {
+                "runAfter": {
+                  "Query_Regional_LAW_Resource_Graph": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Compose",
+                "inputs": "@if(greater(length(coalesce(actions('Query_Regional_LAW_Resource_Graph')?['outputs']?['body']?['data'],json('[]'))),0),first(actions('Query_Regional_LAW_Resource_Graph')?['outputs']?['body']?['data']),json('{}'))"
+              },
+              "Query_Heartbeat": {
+                "runAfter": {
+                  "Regional_LAW_Workspace_ID": [
+                    "Succeeded"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Regional_LAW_Workspace_ID'),'/query')",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "body": {
+                    "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); Heartbeat | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | summarize LastHeartbeat=max(TimeGenerated), Computer=any(Computer), ResourceId=any(_ResourceId) | where isnotnull(LastHeartbeat) | project LastHeartbeat, Computer, ResourceId')",
+                    "timespan": "PT24H"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://api.loganalytics.io"
+                  }
+                }
+              },
+              "Query_Guest_Metrics": {
+                "runAfter": {
+                  "Query_Heartbeat": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Regional_LAW_Workspace_ID'),'/query')",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "body": {
+                    "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); let IM=InsightsMetrics | where TimeGenerated > ago(24h) | where Origin == \"vm.azm.ms\" | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where (Namespace == \"Memory\" and Name == \"AvailableMB\") or (Namespace == \"LogicalDisk\" and Name in (\"FreeSpacePercentage\",\"FreeSpaceMB\")) | extend Instance=tostring(todynamic(Tags)[\"vm.azm.ms/mountId\"]), Value=todouble(Val), Source=\"InsightsMetrics\", Priority=2.0 | summarize arg_max(TimeGenerated, *) by Namespace, Name, Instance | project TimeGenerated, Computer, Namespace, Name, Instance, Value, Tags=tostring(Tags), Source, Priority; let PMemory=Perf | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where ObjectName == \"Memory\" | where CounterName in (\"Available MBytes\",\"Available MBytes Memory\",\"% Committed Bytes In Use\") | summarize arg_max(TimeGenerated, *) by Computer, CounterName | extend Namespace=\"Memory\", Name=case(CounterName == \"% Committed Bytes In Use\",\"AvailablePercent\",\"AvailableMB\"), Instance=\"\", Value=iff(CounterName == \"% Committed Bytes In Use\",100.0-todouble(CounterValue),todouble(CounterValue)), Tags=\"{}\", Source=\"Perf\", Priority=1.0 | project TimeGenerated, Computer, Namespace, Name, Instance, Value, Tags, Source, Priority; let PDisk=Perf | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where ObjectName in (\"LogicalDisk\",\"Logical Disk\") | where CounterName in (\"% Free Space\",\"Free Megabytes\") | summarize arg_max(TimeGenerated, *) by Computer, InstanceName, CounterName | extend Namespace=\"LogicalDisk\", Name=iff(CounterName == \"% Free Space\",\"FreeSpacePercentage\",\"FreeSpaceMB\"), Instance=tostring(InstanceName), Value=todouble(CounterValue), Tags=\"{}\", Source=\"Perf\", Priority=1.0 | project TimeGenerated, Computer, Namespace, Name, Instance, Value, Tags, Source, Priority; union IM, PMemory, PDisk | summarize arg_max(TimeGenerated, *) by Namespace, Name, Instance | project TimeGenerated, Computer, Namespace, Name, Instance, Value, Tags, Source, Priority | order by Namespace asc, Name asc, Instance asc')",
+                    "timespan": "@concat('PT',string(triggerBody()?['periodMinutes']),'M')"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://api.loganalytics.io"
+                  }
+                }
+              },
+              "Query_LAW_Performance": {
+                "runAfter": {
+                  "Query_Guest_Metrics": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Regional_LAW_Workspace_ID'),'/query')",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "body": {
+                    "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); Perf | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where CounterName in (\"% Processor Time\",\"Available MBytes\",\"Available MBytes Memory\",\"% Committed Bytes In Use\",\"% Free Space\",\"Free Megabytes\",\"Disk Reads/sec\",\"Disk Writes/sec\",\"Disk Read Bytes/sec\",\"Disk Write Bytes/sec\",\"Bytes Received/sec\",\"Bytes Sent/sec\") | summarize Average=avg(CounterValue), Maximum=max(CounterValue), Latest=arg_max(TimeGenerated, CounterValue), LatestTime=max(TimeGenerated) by ObjectName, CounterName, InstanceName | project LatestTime, ObjectName, CounterName, InstanceName, Average, Maximum, Latest')",
+                    "timespan": "@concat('PT',string(triggerBody()?['periodMinutes']),'M')"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://api.loganalytics.io"
+                  }
+                }
+              },
+              "Primary_LAW_VM_Log_Found": {
+                "runAfter": {
+                  "Query_Windows_Events": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Compose",
+                "inputs": "@or(greater(length(coalesce(actions('Query_Heartbeat')?['outputs']?['body']?['tables']?[0]?['rows'],json('[]'))),0),greater(length(coalesce(actions('Query_Guest_Metrics')?['outputs']?['body']?['tables']?[0]?['rows'],json('[]'))),0),greater(length(coalesce(actions('Query_LAW_Performance')?['outputs']?['body']?['tables']?[0]?['rows'],json('[]'))),0),greater(length(coalesce(actions('Query_VM_Computer_Inventory')?['outputs']?['body']?['tables']?[0]?['rows'],json('[]'))),0))"
+              },
+              "Fallback_LAW_Last_Resort": {
+                "runAfter": {
+                  "Primary_LAW_VM_Log_Found": [
+                    "Succeeded"
+                  ]
+                },
+                "type": "If",
+                "expression": {
+                  "and": [
+                    {
+                      "equals": [
+                        "@toLower(outputs('VM_Record')?['Location'])",
+                        "westeurope"
+                      ]
+                    },
+                    {
+                      "equals": [
+                        "@outputs('Primary_LAW_VM_Log_Found')",
+                        false
+                      ]
+                    }
+                  ]
+                },
+                "actions": {
+                  "Query_Fallback_LAW_Resource_Graph": {
+                    "type": "Http",
+                    "inputs": {
+                      "uri": "@concat('https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=',parameters('resourceGraphApiVersion'))",
+                      "method": "POST",
+                      "headers": {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json"
+                      },
+                      "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "https://management.azure.com/"
+                      },
+                      "body": {
+                        "query": "@concat('Resources | where type =~ ''microsoft.operationalinsights/workspaces'' | where tolower(name) == tolower(''',parameters('westEuropeFallbackLawName'),''') | project WorkspaceName=name, WorkspaceId=tostring(properties.customerId), WorkspaceResourceId=id, WorkspaceSubscriptionId=subscriptionId, WorkspaceResourceGroup=resourceGroup, WorkspaceLocation=location | take 2')",
+                        "options": {
+                          "resultFormat": "objectArray"
+                        }
+                      }
+                    }
+                  },
+                  "Fallback_LAW_Record": {
+                    "runAfter": {
+                      "Query_Fallback_LAW_Resource_Graph": [
+                        "Succeeded",
+                        "Failed",
+                        "TimedOut",
+                        "Skipped"
+                      ]
+                    },
+                    "type": "Compose",
+                    "inputs": "@if(greater(length(coalesce(actions('Query_Fallback_LAW_Resource_Graph')?['outputs']?['body']?['data'],json('[]'))),0),first(actions('Query_Fallback_LAW_Resource_Graph')?['outputs']?['body']?['data']),json('{}'))"
+                  },
+                  "Query_Fallback_Heartbeat": {
+                    "runAfter": {
+                      "Fallback_LAW_Record": [
+                        "Succeeded",
+                        "Failed",
+                        "TimedOut",
+                        "Skipped"
+                      ]
+                    },
+                    "type": "Http",
+                    "inputs": {
+                      "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Fallback_LAW_Record')?['WorkspaceId'],'/query')",
+                      "method": "POST",
+                      "headers": {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json"
+                      },
+                      "body": {
+                        "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); Heartbeat | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | summarize LastHeartbeat=max(TimeGenerated), Computer=any(Computer), ResourceId=any(_ResourceId) | where isnotnull(LastHeartbeat) | project LastHeartbeat, Computer, ResourceId')",
+                        "timespan": "PT24H"
+                      },
+                      "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "https://api.loganalytics.io"
+                      }
+                    }
+                  },
+                  "Query_Fallback_Guest_Metrics": {
+                    "runAfter": {
+                      "Query_Fallback_Heartbeat": [
+                        "Succeeded",
+                        "Failed",
+                        "TimedOut",
+                        "Skipped"
+                      ]
+                    },
+                    "type": "Http",
+                    "inputs": {
+                      "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Fallback_LAW_Record')?['WorkspaceId'],'/query')",
+                      "method": "POST",
+                      "headers": {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json"
+                      },
+                      "body": {
+                        "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); let IM=InsightsMetrics | where TimeGenerated > ago(24h) | where Origin == \"vm.azm.ms\" | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where (Namespace == \"Memory\" and Name == \"AvailableMB\") or (Namespace == \"LogicalDisk\" and Name in (\"FreeSpacePercentage\",\"FreeSpaceMB\")) | extend Instance=tostring(todynamic(Tags)[\"vm.azm.ms/mountId\"]), Value=todouble(Val), Source=\"InsightsMetrics\", Priority=2.0 | summarize arg_max(TimeGenerated, *) by Namespace, Name, Instance | project TimeGenerated, Computer, Namespace, Name, Instance, Value, Tags=tostring(Tags), Source, Priority; let PMemory=Perf | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where ObjectName == \"Memory\" | where CounterName in (\"Available MBytes\",\"Available MBytes Memory\",\"% Committed Bytes In Use\") | summarize arg_max(TimeGenerated, *) by Computer, CounterName | extend Namespace=\"Memory\", Name=case(CounterName == \"% Committed Bytes In Use\",\"AvailablePercent\",\"AvailableMB\"), Instance=\"\", Value=iff(CounterName == \"% Committed Bytes In Use\",100.0-todouble(CounterValue),todouble(CounterValue)), Tags=\"{}\", Source=\"Perf\", Priority=1.0 | project TimeGenerated, Computer, Namespace, Name, Instance, Value, Tags, Source, Priority; let PDisk=Perf | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where ObjectName in (\"LogicalDisk\",\"Logical Disk\") | where CounterName in (\"% Free Space\",\"Free Megabytes\") | summarize arg_max(TimeGenerated, *) by Computer, InstanceName, CounterName | extend Namespace=\"LogicalDisk\", Name=iff(CounterName == \"% Free Space\",\"FreeSpacePercentage\",\"FreeSpaceMB\"), Instance=tostring(InstanceName), Value=todouble(CounterValue), Tags=\"{}\", Source=\"Perf\", Priority=1.0 | project TimeGenerated, Computer, Namespace, Name, Instance, Value, Tags, Source, Priority; union IM, PMemory, PDisk | summarize arg_max(TimeGenerated, *) by Namespace, Name, Instance | project TimeGenerated, Computer, Namespace, Name, Instance, Value, Tags, Source, Priority | order by Namespace asc, Name asc, Instance asc')",
+                        "timespan": "@concat('PT',string(triggerBody()?['periodMinutes']),'M')"
+                      },
+                      "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "https://api.loganalytics.io"
+                      }
+                    }
+                  },
+                  "Query_Fallback_LAW_Performance": {
+                    "runAfter": {
+                      "Query_Fallback_Guest_Metrics": [
+                        "Succeeded",
+                        "Failed",
+                        "TimedOut",
+                        "Skipped"
+                      ]
+                    },
+                    "type": "Http",
+                    "inputs": {
+                      "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Fallback_LAW_Record')?['WorkspaceId'],'/query')",
+                      "method": "POST",
+                      "headers": {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json"
+                      },
+                      "body": {
+                        "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); Perf | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where CounterName in (\"% Processor Time\",\"Available MBytes\",\"Available MBytes Memory\",\"% Committed Bytes In Use\",\"% Free Space\",\"Free Megabytes\",\"Disk Reads/sec\",\"Disk Writes/sec\",\"Disk Read Bytes/sec\",\"Disk Write Bytes/sec\",\"Bytes Received/sec\",\"Bytes Sent/sec\") | summarize Average=avg(CounterValue), Maximum=max(CounterValue), Latest=arg_max(TimeGenerated, CounterValue), LatestTime=max(TimeGenerated) by ObjectName, CounterName, InstanceName | project LatestTime, ObjectName, CounterName, InstanceName, Average, Maximum, Latest')",
+                        "timespan": "@concat('PT',string(triggerBody()?['periodMinutes']),'M')"
+                      },
+                      "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "https://api.loganalytics.io"
+                      }
+                    }
+                  },
+                  "Build_VM_Health_Result_Fallback": {
+                    "runAfter": {
+                      "Query_Fallback_Windows_Events": [
+                        "Succeeded",
+                        "Failed",
+                        "TimedOut",
+                        "Skipped"
+                      ]
+                    },
+                    "type": "Compose",
+                    "inputs": {
+                      "requestId": "@outputs('Request_ID')",
+                      "hostname": "@outputs('Normalize_Current_Hostname')",
+                      "status": "CompletedWithWarnings",
+                      "message": "No VM telemetry was found in the primary regional LAW. The configured fallback LAW was checked as a last resort.",
+                      "periodMinutes": "@int(triggerBody()?['periodMinutes'])",
+                      "vm": "@outputs('VM_Record')",
+                      "instanceView": "@coalesce(actions('Get_Instance_View')?['outputs']?['body'],json('{}'))",
+                      "resourceHealth": "@coalesce(actions('Get_Resource_Health')?['outputs']?['body'],json('{}'))",
+                      "platformMetrics": "@coalesce(actions('Get_Platform_Metrics')?['outputs']?['body'],json('{\"value\":[]}'))",
+                      "extensions": "@coalesce(actions('List_VM_Extensions')?['outputs']?['body'],json('{\"value\":[]}'))",
+                      "dcrAssociations": "@coalesce(actions('List_DCR_Associations')?['outputs']?['body'],json('{\"value\":[]}'))",
+                      "backup": "@coalesce(actions('Get_Backup_Protection_Status')?['outputs']?['body'],json('{}'))",
+                      "managedDisks": "@coalesce(actions('Query_Attached_Disks')?['outputs']?['body'],json('{\"data\":[]}'))",
+                      "network": "@coalesce(actions('Query_Network_Interfaces')?['outputs']?['body'],json('{\"data\":[]}'))",
+                      "patchAssessment": "@coalesce(actions('Query_Patch_Assessment')?['outputs']?['body'],json('{\"data\":[]}'))",
+                      "guestMetrics": "@coalesce(actions('Query_Fallback_Guest_Metrics')?['outputs']?['body'],json('{\"tables\":[]}'))",
+                      "actionStatus": {
+                        "Get_Instance_View": "@coalesce(actions('Get_Instance_View')?['status'],'Skipped')",
+                        "Get_Resource_Health": "@coalesce(actions('Get_Resource_Health')?['status'],'Skipped')",
+                        "Get_Platform_Metrics": "@coalesce(actions('Get_Platform_Metrics')?['status'],'Skipped')",
+                        "List_VM_Extensions": "@coalesce(actions('List_VM_Extensions')?['status'],'Skipped')",
+                        "List_DCR_Associations": "@coalesce(actions('List_DCR_Associations')?['status'],'Skipped')",
+                        "Get_Backup_Protection_Status": "@coalesce(actions('Get_Backup_Protection_Status')?['status'],'Skipped')",
+                        "Query_Attached_Disks": "@coalesce(actions('Query_Attached_Disks')?['status'],'Skipped')",
+                        "Query_Network_Interfaces": "@coalesce(actions('Query_Network_Interfaces')?['status'],'Skipped')",
+                        "Query_Patch_Assessment": "@coalesce(actions('Query_Patch_Assessment')?['status'],'Skipped')",
+                        "Query_Guest_Metrics": "@coalesce(actions('Query_Fallback_Guest_Metrics')?['status'],'Skipped')",
+                        "Get_Resource_Health_History": "@coalesce(actions('Get_Resource_Health_History')?['status'],'Skipped')",
+                        "Get_Active_Alerts": "@coalesce(actions('Get_Active_Alerts')?['status'],'Skipped')",
+                        "Get_Recent_Activity": "@coalesce(actions('Get_Recent_Activity')?['status'],'Skipped')",
+                        "Query_Backup_Protected_Item": "@coalesce(actions('Query_Backup_Protected_Item')?['status'],'Skipped')",
+                        "Get_Effective_NSGs": "@coalesce(actions('Get_Effective_NSGs')?['status'],'Skipped')",
+                        "Get_Platform_Transfer_Metrics": "@coalesce(actions('Get_Platform_Transfer_Metrics')?['status'],'Skipped')",
+                        "Query_Regional_LAW_Resource_Graph": "@coalesce(actions('Query_Fallback_LAW_Resource_Graph')?['status'],'Skipped')",
+                        "Query_Heartbeat": "@coalesce(actions('Query_Fallback_Heartbeat')?['status'],'Skipped')",
+                        "Query_LAW_Performance": "@coalesce(actions('Query_Fallback_LAW_Performance')?['status'],'Skipped')",
+                        "Primary_Query_Regional_LAW_Resource_Graph": "@coalesce(actions('Query_Regional_LAW_Resource_Graph')?['status'],'Skipped')",
+                        "Primary_Query_Heartbeat": "@coalesce(actions('Query_Heartbeat')?['status'],'Skipped')",
+                        "Primary_Query_Guest_Metrics": "@coalesce(actions('Query_Guest_Metrics')?['status'],'Skipped')",
+                        "Primary_Query_LAW_Performance": "@coalesce(actions('Query_LAW_Performance')?['status'],'Skipped')",
+                        "Query_Fallback_LAW_Resource_Graph": "@coalesce(actions('Query_Fallback_LAW_Resource_Graph')?['status'],'Skipped')",
+                        "Query_Fallback_Heartbeat": "@coalesce(actions('Query_Fallback_Heartbeat')?['status'],'Skipped')",
+                        "Query_Fallback_Guest_Metrics": "@coalesce(actions('Query_Fallback_Guest_Metrics')?['status'],'Skipped')",
+                        "Query_Fallback_LAW_Performance": "@coalesce(actions('Query_Fallback_LAW_Performance')?['status'],'Skipped')",
+                        "Query_Fallback_Windows_Events": "@coalesce(actions('Query_Fallback_Windows_Events')?['status'],'Skipped')",
+                        "Get_CPU_Spike_Metrics_24H": "@coalesce(actions('Get_CPU_Spike_Metrics_24H')?['status'],'Skipped')",
+                        "Primary_Query_Memory_Trend_24H": "@coalesce(actions('Query_Memory_Trend_24H')?['status'],'Skipped')",
+                        "Primary_Query_VM_Computer_Inventory": "@coalesce(actions('Query_VM_Computer_Inventory')?['status'],'Skipped')",
+                        "Query_Fallback_Memory_Trend_24H": "@coalesce(actions('Query_Fallback_Memory_Trend_24H')?['status'],'Skipped')",
+                        "Query_Fallback_VM_Computer_Inventory": "@coalesce(actions('Query_Fallback_VM_Computer_Inventory')?['status'],'Skipped')",
+                        "Primary_Query_Top_Process_Consumers": "@coalesce(actions('Query_Top_Process_Consumers')?['status'],'Skipped')",
+                        "Query_Fallback_Top_Process_Consumers": "@coalesce(actions('Query_Fallback_Top_Process_Consumers')?['status'],'Skipped')"
+                      },
+                      "resourceHealthHistory": "@coalesce(actions('Get_Resource_Health_History')?['outputs']?['body'],json('{\"value\":[]}'))",
+                      "activeAlerts": "@coalesce(actions('Get_Active_Alerts')?['outputs']?['body'],json('{\"value\":[]}'))",
+                      "recentActivity": "@coalesce(actions('Get_Recent_Activity')?['outputs']?['body'],json('{\"value\":[]}'))",
+                      "backupProtectedItem": "@coalesce(actions('Query_Backup_Protected_Item')?['outputs']?['body'],json('{\"data\":[]}'))",
+                      "effectiveNSGs": "@coalesce(actions('Get_Effective_NSGs')?['outputs']?['body'],json('{\"value\":[]}'))",
+                      "platformTransferMetrics": "@coalesce(actions('Get_Platform_Transfer_Metrics')?['outputs']?['body'],json('{\"value\":[]}'))",
+                      "regionalLaw": {
+                        "mappedName": "@parameters('westEuropeFallbackLawName')",
+                        "workspace": "@outputs('Fallback_LAW_Record')",
+                        "matchCount": "@length(coalesce(actions('Query_Fallback_LAW_Resource_Graph')?['outputs']?['body']?['data'],json('[]')))",
+                        "lookupStatus": "@coalesce(actions('Query_Fallback_LAW_Resource_Graph')?['status'],'Skipped')",
+                        "primaryMappedName": "@outputs('Select_Regional_LAW_Name')",
+                        "primaryWorkspace": "@outputs('Regional_LAW_Record')",
+                        "fallbackConfiguredName": "@parameters('westEuropeFallbackLawName')",
+                        "fallbackWorkspace": "@outputs('Fallback_LAW_Record')",
+                        "fallbackUsed": true,
+                        "fallbackReason": "No VM telemetry was returned from the primary regional LAW.",
+                        "effectiveSource": "Fallback LAW (last resort)"
+                      },
+                      "heartbeat": "@coalesce(actions('Query_Fallback_Heartbeat')?['outputs']?['body'],json('{\"tables\":[]}'))",
+                      "lawPerformance": "@coalesce(actions('Query_Fallback_LAW_Performance')?['outputs']?['body'],json('{\"tables\":[]}'))",
+                      "lawQueryDiagnostics": {
+                        "workspaceId": "@coalesce(outputs('Fallback_LAW_Record')?['WorkspaceId'],'')",
+                        "workspaceName": "@coalesce(outputs('Fallback_LAW_Record')?['WorkspaceName'],parameters('westEuropeFallbackLawName'))",
+                        "heartbeatStatus": "@coalesce(actions('Query_Fallback_Heartbeat')?['status'],'Skipped')",
+                        "heartbeatHttpStatus": "@coalesce(actions('Query_Fallback_Heartbeat')?['outputs']?['statusCode'],0)",
+                        "heartbeatErrorCode": "@coalesce(actions('Query_Fallback_Heartbeat')?['outputs']?['body']?['error']?['code'],'')",
+                        "heartbeatErrorMessage": "@coalesce(actions('Query_Fallback_Heartbeat')?['outputs']?['body']?['error']?['message'],actions('Query_Fallback_Heartbeat')?['outputs']?['body']?['message'],'')",
+                        "guestStatus": "@coalesce(actions('Query_Fallback_Guest_Metrics')?['status'],'Skipped')",
+                        "guestHttpStatus": "@coalesce(actions('Query_Fallback_Guest_Metrics')?['outputs']?['statusCode'],0)",
+                        "guestErrorCode": "@coalesce(actions('Query_Fallback_Guest_Metrics')?['outputs']?['body']?['error']?['code'],'')",
+                        "guestErrorMessage": "@coalesce(actions('Query_Fallback_Guest_Metrics')?['outputs']?['body']?['error']?['message'],actions('Query_Fallback_Guest_Metrics')?['outputs']?['body']?['message'],'')",
+                        "performanceStatus": "@coalesce(actions('Query_Fallback_LAW_Performance')?['status'],'Skipped')",
+                        "performanceHttpStatus": "@coalesce(actions('Query_Fallback_LAW_Performance')?['outputs']?['statusCode'],0)",
+                        "performanceErrorCode": "@coalesce(actions('Query_Fallback_LAW_Performance')?['outputs']?['body']?['error']?['code'],'')",
+                        "performanceErrorMessage": "@coalesce(actions('Query_Fallback_LAW_Performance')?['outputs']?['body']?['error']?['message'],actions('Query_Fallback_LAW_Performance')?['outputs']?['body']?['message'],'')",
+                        "fallbackUsed": true,
+                        "primaryWorkspaceName": "@coalesce(outputs('Regional_LAW_Record')?['WorkspaceName'],outputs('Select_Regional_LAW_Name'))",
+                        "fallbackWorkspaceName": "@coalesce(outputs('Fallback_LAW_Record')?['WorkspaceName'],parameters('westEuropeFallbackLawName'))",
+                        "primaryHeartbeatStatus": "@coalesce(actions('Query_Heartbeat')?['status'],'Skipped')",
+                        "primaryHeartbeatHttpStatus": "@coalesce(actions('Query_Heartbeat')?['outputs']?['statusCode'],0)",
+                        "primaryGuestStatus": "@coalesce(actions('Query_Guest_Metrics')?['status'],'Skipped')",
+                        "primaryGuestHttpStatus": "@coalesce(actions('Query_Guest_Metrics')?['outputs']?['statusCode'],0)",
+                        "primaryPerformanceStatus": "@coalesce(actions('Query_LAW_Performance')?['status'],'Skipped')",
+                        "primaryPerformanceHttpStatus": "@coalesce(actions('Query_LAW_Performance')?['outputs']?['statusCode'],0)",
+                        "windowsEventStatus": "@coalesce(actions('Query_Fallback_Windows_Events')?['status'],'Skipped')",
+                        "windowsEventHttpStatus": "@coalesce(actions('Query_Fallback_Windows_Events')?['outputs']?['statusCode'],0)",
+                        "windowsEventErrorCode": "@coalesce(actions('Query_Fallback_Windows_Events')?['outputs']?['body']?['error']?['code'],'')",
+                        "windowsEventErrorMessage": "@coalesce(actions('Query_Fallback_Windows_Events')?['outputs']?['body']?['error']?['message'],actions('Query_Fallback_Windows_Events')?['outputs']?['body']?['message'],'')",
+                        "primaryWindowsEventStatus": "@coalesce(actions('Query_Windows_Events')?['status'],'Skipped')",
+                        "primaryWindowsEventHttpStatus": "@coalesce(actions('Query_Windows_Events')?['outputs']?['statusCode'],0)",
+                        "memoryTrendStatus": "@coalesce(actions('Query_Fallback_Memory_Trend_24H')?['status'],'Skipped')",
+                        "memoryTrendHttpStatus": "@coalesce(actions('Query_Fallback_Memory_Trend_24H')?['outputs']?['statusCode'],0)",
+                        "inventoryStatus": "@coalesce(actions('Query_Fallback_VM_Computer_Inventory')?['status'],'Skipped')",
+                        "inventoryHttpStatus": "@coalesce(actions('Query_Fallback_VM_Computer_Inventory')?['outputs']?['statusCode'],0)",
+                        "primaryMemoryTrendStatus": "@coalesce(actions('Query_Memory_Trend_24H')?['status'],'Skipped')",
+                        "primaryMemoryTrendHttpStatus": "@coalesce(actions('Query_Memory_Trend_24H')?['outputs']?['statusCode'],0)",
+                        "primaryInventoryStatus": "@coalesce(actions('Query_VM_Computer_Inventory')?['status'],'Skipped')",
+                        "primaryInventoryHttpStatus": "@coalesce(actions('Query_VM_Computer_Inventory')?['outputs']?['statusCode'],0)",
+                        "processConsumersStatus": "@coalesce(actions('Query_Fallback_Top_Process_Consumers')?['status'],'Skipped')",
+                        "processConsumersHttpStatus": "@coalesce(actions('Query_Fallback_Top_Process_Consumers')?['outputs']?['statusCode'],0)",
+                        "processConsumersErrorCode": "@coalesce(actions('Query_Fallback_Top_Process_Consumers')?['outputs']?['body']?['error']?['code'],'')",
+                        "processConsumersErrorMessage": "@coalesce(actions('Query_Fallback_Top_Process_Consumers')?['outputs']?['body']?['error']?['message'],actions('Query_Fallback_Top_Process_Consumers')?['outputs']?['body']?['message'],'')",
+                        "primaryProcessConsumersStatus": "@coalesce(actions('Query_Top_Process_Consumers')?['status'],'Skipped')",
+                        "primaryProcessConsumersHttpStatus": "@coalesce(actions('Query_Top_Process_Consumers')?['outputs']?['statusCode'],0)"
+                      },
+                      "hardware": "@outputs('VM_Hardware_Profile')",
+                      "windowsEvents": "@coalesce(actions('Query_Fallback_Windows_Events')?['outputs']?['body'],json('{}'))",
+                      "cpuSpikeMetrics24h": "@coalesce(actions('Get_CPU_Spike_Metrics_24H')?['outputs']?['body'],json('{\"value\":[]}'))",
+                      "memoryTrend24h": "@coalesce(actions('Query_Fallback_Memory_Trend_24H')?['outputs']?['body'],json('{\"tables\":[]}'))",
+                      "vmComputerInventory": "@coalesce(actions('Query_Fallback_VM_Computer_Inventory')?['outputs']?['body'],json('{\"tables\":[]}'))",
+                      "topProcessConsumers": "@coalesce(actions('Query_Fallback_Top_Process_Consumers')?['outputs']?['body'],json('{\"tables\":[]}'))"
+                    }
+                  },
+                  "Write_VM_Health_Result_Fallback": {
+                    "runAfter": {
+                      "Build_VM_Health_Result_Fallback": [
+                        "Succeeded"
+                      ]
+                    },
+                    "type": "Http",
+                    "inputs": {
+                      "uri": "@outputs('VM_Result_Blob_URL')",
+                      "method": "PUT",
+                      "headers": {
+                        "x-ms-blob-type": "BlockBlob",
+                        "x-ms-version": "2023-11-03",
+                        "x-ms-date": "@formatDateTime(utcNow(),'R')",
+                        "Content-Type": "application/json"
+                      },
+                      "body": "@outputs('Build_VM_Health_Result_Fallback')",
+                      "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "https://storage.azure.com/"
+                      }
+                    }
+                  },
+                  "Query_Fallback_Windows_Events": {
+                    "runAfter": {
+                      "Query_Fallback_Top_Process_Consumers": [
+                        "Succeeded",
+                        "Failed",
+                        "TimedOut",
+                        "Skipped"
+                      ]
+                    },
+                    "type": "Http",
+                    "inputs": {
+                      "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Fallback_LAW_Record')?['WorkspaceId'],'/query')",
+                      "method": "POST",
+                      "headers": {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json"
+                      },
+                      "body": {
+                        "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); Event | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where EventLog in (\"System\",\"Application\") | where EventLevel in (1,2) or EventLevelName in (\"Critical\",\"Error\") | extend Level=case(EventLevel == 1 or EventLevelName =~ \"Critical\",\"Critical\",EventLevel == 2 or EventLevelName =~ \"Error\",\"Error\",\"Unknown\") | extend EventMessage=tostring(Message) | summarize Occurrences=count(), FirstSeen=min(TimeGenerated), arg_max(TimeGenerated, EventMessage, Computer, ResourceId=tostring(_ResourceId)) by Level, EventLog, EventID, Source | project Level, EventLog, EventID, Source, Occurrences, FirstSeen, LastSeen=TimeGenerated, Message=EventMessage, Computer, ResourceId | order by case(Level == \"Critical\",0,Level == \"Error\",1,2) asc, Occurrences desc, LastSeen desc | take 100')",
+                        "timespan": "PT24H"
+                      },
+                      "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "https://api.loganalytics.io"
+                      }
+                    }
+                  },
+                  "Query_Fallback_Memory_Trend_24H": {
+                    "runAfter": {
+                      "Query_Fallback_LAW_Performance": [
+                        "Succeeded",
+                        "Failed",
+                        "TimedOut",
+                        "Skipped"
+                      ]
+                    },
+                    "type": "Http",
+                    "inputs": {
+                      "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Fallback_LAW_Record')?['WorkspaceId'],'/query')",
+                      "method": "POST",
+                      "headers": {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json"
+                      },
+                      "body": {
+                        "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); let TotalMemoryMB=todouble(',string(coalesce(outputs('VM_Hardware_Profile')?['memoryMB'],0)),'); let P=Perf | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H; let M1=P | where ObjectName == \"Memory\" and CounterName == \"% Committed Bytes In Use\" | summarize Value=avg(todouble(CounterValue)) by TimeGenerated=bin(TimeGenerated, 1m) | extend Metric=\"RAM Used %\", Source=\"Perf\"; let M2=InsightsMetrics | where TimeGenerated > ago(24h) | where Origin == \"vm.azm.ms\" | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where Namespace == \"Memory\" and Name == \"AvailableMB\" | extend AvailableMB=todouble(Val) | where isnotnull(AvailableMB) and TotalMemoryMB > 0 | extend UsedPct=100.0*(1.0-(AvailableMB/TotalMemoryMB)) | where UsedPct >= 0 and UsedPct <= 100 | summarize Value=avg(UsedPct) by TimeGenerated=bin(TimeGenerated, 1m) | extend Metric=\"RAM Used %\", Source=\"InsightsMetrics\"; union M1,M2 | project TimeGenerated, Metric, Value, Source | order by TimeGenerated asc')",
+                        "timespan": "PT24H"
+                      },
+                      "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "https://api.loganalytics.io"
+                      }
+                    }
+                  },
+                  "Query_Fallback_VM_Computer_Inventory": {
+                    "runAfter": {
+                      "Query_Fallback_Memory_Trend_24H": [
+                        "Succeeded",
+                        "Failed",
+                        "TimedOut",
+                        "Skipped"
+                      ]
+                    },
+                    "type": "Http",
+                    "inputs": {
+                      "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Fallback_LAW_Record')?['WorkspaceId'],'/query')",
+                      "method": "POST",
+                      "headers": {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json"
+                      },
+                      "body": {
+                        "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); VMComputer | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(HostName) == H or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | top 1 by TimeGenerated desc | project TimeGenerated, Computer, HostName, FullDisplayName, DnsNames, OperatingSystemFullName, PhysicalMemoryMB, Cpus, TimeZone, ResourceId=tostring(_ResourceId)')",
+                        "timespan": "PT24H"
+                      },
+                      "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "https://api.loganalytics.io"
+                      }
+                    }
+                  },
+                  "Query_Fallback_Top_Process_Consumers": {
+                    "runAfter": {
+                      "Query_Fallback_VM_Computer_Inventory": [
+                        "Succeeded",
+                        "Failed",
+                        "TimedOut",
+                        "Skipped"
+                      ]
+                    },
+                    "type": "Http",
+                    "inputs": {
+                      "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Fallback_LAW_Record')?['WorkspaceId'],'/query')",
+                      "method": "POST",
+                      "headers": {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json"
+                      },
+                      "body": {
+                        "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); let Cores=todouble(',string(coalesce(outputs('VM_Hardware_Profile')?['vCpuCount'],1)),'); let P=Perf | where TimeGenerated > ago(30m) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where ObjectName == \"Process\" | where InstanceName !in (\"_Total\",\"Idle\") | where CounterName in (\"% Processor Time\",\"Working Set - Private\",\"ID Process\"); let CpuRows=P | where CounterName == \"% Processor Time\"; let CpuLatest=CpuRows | summarize arg_max(TimeGenerated, CounterValue) by InstanceName | project Process=InstanceName, LastSample=TimeGenerated, CurrentRaw=todouble(CounterValue); let CpuStats=CpuRows | summarize AverageRaw=avg(todouble(CounterValue)), PeakRaw=max(todouble(CounterValue)) by InstanceName | project Process=InstanceName, AverageRaw, PeakRaw; let PidLatest=P | where CounterName == \"ID Process\" | summarize arg_max(TimeGenerated, CounterValue) by InstanceName | project Process=InstanceName, PID=toint(CounterValue); let CPU=CpuLatest | join kind=leftouter CpuStats on Process | join kind=leftouter PidLatest on Process | extend Divisor=iff(Cores > 0,Cores,1.0), Current=min_of(100.0,CurrentRaw/Divisor), Average=min_of(100.0,AverageRaw/Divisor), Peak=min_of(100.0,PeakRaw/Divisor), Metric=\"CPU\", Unit=\"%\" | project Metric, Process, PID, Current, Average, Peak, Unit, LastSample | top 3 by Current desc; let MemRows=P | where CounterName == \"Working Set - Private\"; let MemLatest=MemRows | summarize arg_max(TimeGenerated, CounterValue) by InstanceName | project Process=InstanceName, LastSample=TimeGenerated, CurrentRaw=todouble(CounterValue); let MemStats=MemRows | summarize AverageRaw=avg(todouble(CounterValue)), PeakRaw=max(todouble(CounterValue)) by InstanceName | project Process=InstanceName, AverageRaw, PeakRaw; let Memory=MemLatest | join kind=leftouter MemStats on Process | join kind=leftouter PidLatest on Process | extend Current=CurrentRaw/1024.0/1024.0, Average=AverageRaw/1024.0/1024.0, Peak=PeakRaw/1024.0/1024.0, Metric=\"Memory\", Unit=\"MB\" | project Metric, Process, PID, Current, Average, Peak, Unit, LastSample | top 3 by Current desc; union CPU,Memory | order by Metric asc, Current desc')",
+                        "timespan": "PT30M"
+                      },
+                      "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "https://api.loganalytics.io"
+                      }
+                    }
+                  }
+                },
+                "else": {
+                  "actions": {
+                    "Build_VM_Health_Result_Primary": {
+                      "type": "Compose",
+                      "inputs": {
+                        "requestId": "@outputs('Request_ID')",
+                        "hostname": "@outputs('Normalize_Current_Hostname')",
+                        "status": "@if(and(equals(coalesce(actions('Get_Instance_View')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Get_Resource_Health')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Get_Resource_Health_History')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Get_Active_Alerts')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Get_Recent_Activity')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Get_Platform_Metrics')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Get_Platform_Transfer_Metrics')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('List_VM_Extensions')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('List_DCR_Associations')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Get_Backup_Protection_Status')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Query_Backup_Protected_Item')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Query_Attached_Disks')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Query_Network_Interfaces')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Get_Effective_NSGs')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Query_Patch_Assessment')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Query_Regional_LAW_Resource_Graph')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Query_Heartbeat')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Query_Guest_Metrics')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Query_LAW_Performance')?['status'],'Skipped'),'Succeeded'),equals(coalesce(actions('Query_Windows_Events')?['status'],'Skipped'),'Succeeded')),'Completed','CompletedWithWarnings')",
+                        "message": "Read-only VM health checks completed using the primary regional Log Analytics workspace.",
+                        "periodMinutes": "@int(triggerBody()?['periodMinutes'])",
+                        "vm": "@outputs('VM_Record')",
+                        "instanceView": "@coalesce(actions('Get_Instance_View')?['outputs']?['body'],json('{}'))",
+                        "resourceHealth": "@coalesce(actions('Get_Resource_Health')?['outputs']?['body'],json('{}'))",
+                        "platformMetrics": "@coalesce(actions('Get_Platform_Metrics')?['outputs']?['body'],json('{\"value\":[]}'))",
+                        "extensions": "@coalesce(actions('List_VM_Extensions')?['outputs']?['body'],json('{\"value\":[]}'))",
+                        "dcrAssociations": "@coalesce(actions('List_DCR_Associations')?['outputs']?['body'],json('{\"value\":[]}'))",
+                        "backup": "@coalesce(actions('Get_Backup_Protection_Status')?['outputs']?['body'],json('{}'))",
+                        "managedDisks": "@coalesce(actions('Query_Attached_Disks')?['outputs']?['body'],json('{\"data\":[]}'))",
+                        "network": "@coalesce(actions('Query_Network_Interfaces')?['outputs']?['body'],json('{\"data\":[]}'))",
+                        "patchAssessment": "@coalesce(actions('Query_Patch_Assessment')?['outputs']?['body'],json('{\"data\":[]}'))",
+                        "guestMetrics": "@coalesce(actions('Query_Guest_Metrics')?['outputs']?['body'],json('{\"tables\":[]}'))",
+                        "actionStatus": {
+                          "Get_Instance_View": "@coalesce(actions('Get_Instance_View')?['status'],'Skipped')",
+                          "Get_Resource_Health": "@coalesce(actions('Get_Resource_Health')?['status'],'Skipped')",
+                          "Get_Platform_Metrics": "@coalesce(actions('Get_Platform_Metrics')?['status'],'Skipped')",
+                          "List_VM_Extensions": "@coalesce(actions('List_VM_Extensions')?['status'],'Skipped')",
+                          "List_DCR_Associations": "@coalesce(actions('List_DCR_Associations')?['status'],'Skipped')",
+                          "Get_Backup_Protection_Status": "@coalesce(actions('Get_Backup_Protection_Status')?['status'],'Skipped')",
+                          "Query_Attached_Disks": "@coalesce(actions('Query_Attached_Disks')?['status'],'Skipped')",
+                          "Query_Network_Interfaces": "@coalesce(actions('Query_Network_Interfaces')?['status'],'Skipped')",
+                          "Query_Patch_Assessment": "@coalesce(actions('Query_Patch_Assessment')?['status'],'Skipped')",
+                          "Query_Guest_Metrics": "@coalesce(actions('Query_Guest_Metrics')?['status'],'Skipped')",
+                          "Get_Resource_Health_History": "@coalesce(actions('Get_Resource_Health_History')?['status'],'Skipped')",
+                          "Get_Active_Alerts": "@coalesce(actions('Get_Active_Alerts')?['status'],'Skipped')",
+                          "Get_Recent_Activity": "@coalesce(actions('Get_Recent_Activity')?['status'],'Skipped')",
+                          "Query_Backup_Protected_Item": "@coalesce(actions('Query_Backup_Protected_Item')?['status'],'Skipped')",
+                          "Get_Effective_NSGs": "@coalesce(actions('Get_Effective_NSGs')?['status'],'Skipped')",
+                          "Get_Platform_Transfer_Metrics": "@coalesce(actions('Get_Platform_Transfer_Metrics')?['status'],'Skipped')",
+                          "Query_Regional_LAW_Resource_Graph": "@coalesce(actions('Query_Regional_LAW_Resource_Graph')?['status'],'Skipped')",
+                          "Query_Heartbeat": "@coalesce(actions('Query_Heartbeat')?['status'],'Skipped')",
+                          "Query_LAW_Performance": "@coalesce(actions('Query_LAW_Performance')?['status'],'Skipped')",
+                          "Query_Windows_Events": "@coalesce(actions('Query_Windows_Events')?['status'],'Skipped')",
+                          "Get_CPU_Spike_Metrics_24H": "@coalesce(actions('Get_CPU_Spike_Metrics_24H')?['status'],'Skipped')",
+                          "Query_Memory_Trend_24H": "@coalesce(actions('Query_Memory_Trend_24H')?['status'],'Skipped')",
+                          "Query_VM_Computer_Inventory": "@coalesce(actions('Query_VM_Computer_Inventory')?['status'],'Skipped')",
+                          "Query_Top_Process_Consumers": "@coalesce(actions('Query_Top_Process_Consumers')?['status'],'Skipped')"
+                        },
+                        "resourceHealthHistory": "@coalesce(actions('Get_Resource_Health_History')?['outputs']?['body'],json('{\"value\":[]}'))",
+                        "activeAlerts": "@coalesce(actions('Get_Active_Alerts')?['outputs']?['body'],json('{\"value\":[]}'))",
+                        "recentActivity": "@coalesce(actions('Get_Recent_Activity')?['outputs']?['body'],json('{\"value\":[]}'))",
+                        "backupProtectedItem": "@coalesce(actions('Query_Backup_Protected_Item')?['outputs']?['body'],json('{\"data\":[]}'))",
+                        "effectiveNSGs": "@coalesce(actions('Get_Effective_NSGs')?['outputs']?['body'],json('{\"value\":[]}'))",
+                        "platformTransferMetrics": "@coalesce(actions('Get_Platform_Transfer_Metrics')?['outputs']?['body'],json('{\"value\":[]}'))",
+                        "regionalLaw": {
+                          "mappedName": "@outputs('Select_Regional_LAW_Name')",
+                          "workspace": "@outputs('Regional_LAW_Record')",
+                          "matchCount": "@length(coalesce(actions('Query_Regional_LAW_Resource_Graph')?['outputs']?['body']?['data'],json('[]')))",
+                          "lookupStatus": "@coalesce(actions('Query_Regional_LAW_Resource_Graph')?['status'],'Skipped')",
+                          "primaryMappedName": "@outputs('Select_Regional_LAW_Name')",
+                          "primaryWorkspace": "@outputs('Regional_LAW_Record')",
+                          "fallbackConfiguredName": "@parameters('westEuropeFallbackLawName')",
+                          "fallbackWorkspace": {},
+                          "fallbackUsed": false,
+                          "fallbackReason": "",
+                          "effectiveSource": "Primary regional LAW"
+                        },
+                        "heartbeat": "@coalesce(actions('Query_Heartbeat')?['outputs']?['body'],json('{\"tables\":[]}'))",
+                        "lawPerformance": "@coalesce(actions('Query_LAW_Performance')?['outputs']?['body'],json('{\"tables\":[]}'))",
+                        "lawQueryDiagnostics": {
+                          "workspaceId": "@coalesce(outputs('Regional_LAW_Record')?['WorkspaceId'],'')",
+                          "workspaceName": "@coalesce(outputs('Regional_LAW_Record')?['WorkspaceName'],outputs('Select_Regional_LAW_Name'))",
+                          "heartbeatStatus": "@coalesce(actions('Query_Heartbeat')?['status'],'Skipped')",
+                          "heartbeatHttpStatus": "@coalesce(actions('Query_Heartbeat')?['outputs']?['statusCode'],0)",
+                          "heartbeatErrorCode": "@coalesce(actions('Query_Heartbeat')?['outputs']?['body']?['error']?['code'],'')",
+                          "heartbeatErrorMessage": "@coalesce(actions('Query_Heartbeat')?['outputs']?['body']?['error']?['message'],actions('Query_Heartbeat')?['outputs']?['body']?['message'],'')",
+                          "guestStatus": "@coalesce(actions('Query_Guest_Metrics')?['status'],'Skipped')",
+                          "guestHttpStatus": "@coalesce(actions('Query_Guest_Metrics')?['outputs']?['statusCode'],0)",
+                          "guestErrorCode": "@coalesce(actions('Query_Guest_Metrics')?['outputs']?['body']?['error']?['code'],'')",
+                          "guestErrorMessage": "@coalesce(actions('Query_Guest_Metrics')?['outputs']?['body']?['error']?['message'],actions('Query_Guest_Metrics')?['outputs']?['body']?['message'],'')",
+                          "performanceStatus": "@coalesce(actions('Query_LAW_Performance')?['status'],'Skipped')",
+                          "performanceHttpStatus": "@coalesce(actions('Query_LAW_Performance')?['outputs']?['statusCode'],0)",
+                          "performanceErrorCode": "@coalesce(actions('Query_LAW_Performance')?['outputs']?['body']?['error']?['code'],'')",
+                          "performanceErrorMessage": "@coalesce(actions('Query_LAW_Performance')?['outputs']?['body']?['error']?['message'],actions('Query_LAW_Performance')?['outputs']?['body']?['message'],'')",
+                          "fallbackUsed": false,
+                          "primaryWorkspaceName": "@coalesce(outputs('Regional_LAW_Record')?['WorkspaceName'],outputs('Select_Regional_LAW_Name'))",
+                          "fallbackWorkspaceName": "@parameters('westEuropeFallbackLawName')",
+                          "windowsEventStatus": "@coalesce(actions('Query_Windows_Events')?['status'],'Skipped')",
+                          "windowsEventHttpStatus": "@coalesce(actions('Query_Windows_Events')?['outputs']?['statusCode'],0)",
+                          "windowsEventErrorCode": "@coalesce(actions('Query_Windows_Events')?['outputs']?['body']?['error']?['code'],'')",
+                          "windowsEventErrorMessage": "@coalesce(actions('Query_Windows_Events')?['outputs']?['body']?['error']?['message'],actions('Query_Windows_Events')?['outputs']?['body']?['message'],'')",
+                          "memoryTrendStatus": "@coalesce(actions('Query_Memory_Trend_24H')?['status'],'Skipped')",
+                          "memoryTrendHttpStatus": "@coalesce(actions('Query_Memory_Trend_24H')?['outputs']?['statusCode'],0)",
+                          "inventoryStatus": "@coalesce(actions('Query_VM_Computer_Inventory')?['status'],'Skipped')",
+                          "inventoryHttpStatus": "@coalesce(actions('Query_VM_Computer_Inventory')?['outputs']?['statusCode'],0)",
+                          "processConsumersStatus": "@coalesce(actions('Query_Top_Process_Consumers')?['status'],'Skipped')",
+                          "processConsumersHttpStatus": "@coalesce(actions('Query_Top_Process_Consumers')?['outputs']?['statusCode'],0)",
+                          "processConsumersErrorCode": "@coalesce(actions('Query_Top_Process_Consumers')?['outputs']?['body']?['error']?['code'],'')",
+                          "processConsumersErrorMessage": "@coalesce(actions('Query_Top_Process_Consumers')?['outputs']?['body']?['error']?['message'],actions('Query_Top_Process_Consumers')?['outputs']?['body']?['message'],'')"
+                        },
+                        "hardware": "@outputs('VM_Hardware_Profile')",
+                        "windowsEvents": "@coalesce(actions('Query_Windows_Events')?['outputs']?['body'],json('{}'))",
+                        "cpuSpikeMetrics24h": "@coalesce(actions('Get_CPU_Spike_Metrics_24H')?['outputs']?['body'],json('{\"value\":[]}'))",
+                        "memoryTrend24h": "@coalesce(actions('Query_Memory_Trend_24H')?['outputs']?['body'],json('{\"tables\":[]}'))",
+                        "vmComputerInventory": "@coalesce(actions('Query_VM_Computer_Inventory')?['outputs']?['body'],json('{\"tables\":[]}'))",
+                        "topProcessConsumers": "@coalesce(actions('Query_Top_Process_Consumers')?['outputs']?['body'],json('{\"tables\":[]}'))"
+                      }
+                    },
+                    "Write_VM_Health_Result_Primary": {
+                      "runAfter": {
+                        "Build_VM_Health_Result_Primary": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Http",
+                      "inputs": {
+                        "uri": "@outputs('VM_Result_Blob_URL')",
+                        "method": "PUT",
+                        "headers": {
+                          "x-ms-blob-type": "BlockBlob",
+                          "x-ms-version": "2023-11-03",
+                          "x-ms-date": "@formatDateTime(utcNow(),'R')",
+                          "Content-Type": "application/json"
+                        },
+                        "body": "@outputs('Build_VM_Health_Result_Primary')",
+                        "authentication": {
+                          "type": "ManagedServiceIdentity",
+                          "audience": "https://storage.azure.com/"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "Get_VM_Available_Sizes": {
+                "runAfter": {
+                  "VM_Record": [
+                    "Succeeded"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com',outputs('VM_Record')?['ResourceId'],'/vmSizes?api-version=',parameters('computeApiVersion'))",
+                  "method": "GET",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "Filter_Current_VM_Size": {
+                "runAfter": {
+                  "Get_VM_Available_Sizes": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Query",
+                "inputs": {
+                  "from": "@coalesce(actions('Get_VM_Available_Sizes')?['outputs']?['body']?['value'],json('[]'))",
+                  "where": "@equals(toLower(string(item()?['name'])),toLower(string(outputs('VM_Record')?['VMSize'])))"
+                }
+              },
+              "VM_Hardware_Profile": {
+                "runAfter": {
+                  "Filter_Current_VM_Size": [
+                    "Succeeded"
+                  ]
+                },
+                "type": "Compose",
+                "inputs": {
+                  "vmSize": "@coalesce(outputs('VM_Record')?['VMSize'],'')",
+                  "vCpuCount": "@if(greater(length(body('Filter_Current_VM_Size')),0),first(body('Filter_Current_VM_Size'))?['numberOfCores'],json('null'))",
+                  "memoryMB": "@if(greater(length(body('Filter_Current_VM_Size')),0),first(body('Filter_Current_VM_Size'))?['memoryInMB'],json('null'))",
+                  "maxDataDiskCount": "@if(greater(length(body('Filter_Current_VM_Size')),0),first(body('Filter_Current_VM_Size'))?['maxDataDiskCount'],json('null'))",
+                  "lookupStatus": "@coalesce(actions('Get_VM_Available_Sizes')?['status'],'Skipped')"
+                }
+              },
+              "Query_Windows_Events": {
+                "runAfter": {
+                  "Query_Top_Process_Consumers": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Regional_LAW_Workspace_ID'),'/query')",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "body": {
+                    "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); Event | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where EventLog in (\"System\",\"Application\") | where EventLevel in (1,2) or EventLevelName in (\"Critical\",\"Error\") | extend Level=case(EventLevel == 1 or EventLevelName =~ \"Critical\",\"Critical\",EventLevel == 2 or EventLevelName =~ \"Error\",\"Error\",\"Unknown\") | extend EventMessage=tostring(Message) | summarize Occurrences=count(), FirstSeen=min(TimeGenerated), arg_max(TimeGenerated, EventMessage, Computer, ResourceId=tostring(_ResourceId)) by Level, EventLog, EventID, Source | project Level, EventLog, EventID, Source, Occurrences, FirstSeen, LastSeen=TimeGenerated, Message=EventMessage, Computer, ResourceId | order by case(Level == \"Critical\",0,Level == \"Error\",1,2) asc, Occurrences desc, LastSeen desc | take 100')",
+                    "timespan": "PT24H"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://api.loganalytics.io"
+                  }
+                }
+              },
+              "Regional_LAW_Workspace_ID": {
+                "runAfter": {
+                  "Regional_LAW_Record": [
+                    "Succeeded"
+                  ]
+                },
+                "type": "Compose",
+                "inputs": "@coalesce(outputs('Regional_LAW_Record')?['WorkspaceId'],'')"
+              },
+              "Get_CPU_Spike_Metrics_24H": {
+                "runAfter": {
+                  "Get_Platform_Metrics": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://management.azure.com',outputs('VM_Record')?['ResourceId'],'/providers/Microsoft.Insights/metrics?api-version=',parameters('metricsApiVersion'),'&timespan=',formatDateTime(addHours(utcNow(),-24),'yyyy-MM-ddTHH:mm:ssZ'),'/',formatDateTime(utcNow(),'yyyy-MM-ddTHH:mm:ssZ'),'&interval=PT1M&metricnames=Percentage%20CPU&aggregation=Average%2CMaximum')",
+                  "method": "GET",
+                  "headers": {
+                    "Accept": "application/json"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://management.azure.com/"
+                  }
+                }
+              },
+              "Query_Memory_Trend_24H": {
+                "runAfter": {
+                  "Query_LAW_Performance": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Regional_LAW_Workspace_ID'),'/query')",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "body": {
+                    "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); let TotalMemoryMB=todouble(',string(coalesce(outputs('VM_Hardware_Profile')?['memoryMB'],0)),'); let P=Perf | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H; let M1=P | where ObjectName == \"Memory\" and CounterName == \"% Committed Bytes In Use\" | summarize Value=avg(todouble(CounterValue)) by TimeGenerated=bin(TimeGenerated, 1m) | extend Metric=\"RAM Used %\", Source=\"Perf\"; let M2=InsightsMetrics | where TimeGenerated > ago(24h) | where Origin == \"vm.azm.ms\" | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where Namespace == \"Memory\" and Name == \"AvailableMB\" | extend AvailableMB=todouble(Val) | where isnotnull(AvailableMB) and TotalMemoryMB > 0 | extend UsedPct=100.0*(1.0-(AvailableMB/TotalMemoryMB)) | where UsedPct >= 0 and UsedPct <= 100 | summarize Value=avg(UsedPct) by TimeGenerated=bin(TimeGenerated, 1m) | extend Metric=\"RAM Used %\", Source=\"InsightsMetrics\"; union M1,M2 | project TimeGenerated, Metric, Value, Source | order by TimeGenerated asc')",
+                    "timespan": "PT24H"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://api.loganalytics.io"
+                  }
+                }
+              },
+              "Query_VM_Computer_Inventory": {
+                "runAfter": {
+                  "Query_Memory_Trend_24H": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Regional_LAW_Workspace_ID'),'/query')",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "body": {
+                    "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); VMComputer | where TimeGenerated > ago(24h) | where tolower(tostring(_ResourceId)) == RID or toupper(HostName) == H or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | top 1 by TimeGenerated desc | project TimeGenerated, Computer, HostName, FullDisplayName, DnsNames, OperatingSystemFullName, PhysicalMemoryMB, Cpus, TimeZone, ResourceId=tostring(_ResourceId)')",
+                    "timespan": "PT24H"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://api.loganalytics.io"
+                  }
+                }
+              },
+              "Query_Top_Process_Consumers": {
+                "runAfter": {
+                  "Query_VM_Computer_Inventory": [
+                    "Succeeded",
+                    "Failed",
+                    "TimedOut",
+                    "Skipped"
+                  ]
+                },
+                "type": "Http",
+                "inputs": {
+                  "uri": "@concat('https://api.loganalytics.io/v1/workspaces/',outputs('Regional_LAW_Workspace_ID'),'/query')",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                  },
+                  "body": {
+                    "query": "@concat('let RID=tolower(''',outputs('VM_Record')?['ResourceId'],'''); let H=toupper(''',outputs('Normalize_Current_Hostname'),'''); let Cores=todouble(',string(coalesce(outputs('VM_Hardware_Profile')?['vCpuCount'],1)),'); let P=Perf | where TimeGenerated > ago(30m) | where tolower(tostring(_ResourceId)) == RID or toupper(Computer) == H or toupper(tostring(split(Computer,''.'')[0])) == H | where ObjectName == \"Process\" | where InstanceName !in (\"_Total\",\"Idle\") | where CounterName in (\"% Processor Time\",\"Working Set - Private\",\"ID Process\"); let CpuRows=P | where CounterName == \"% Processor Time\"; let CpuLatest=CpuRows | summarize arg_max(TimeGenerated, CounterValue) by InstanceName | project Process=InstanceName, LastSample=TimeGenerated, CurrentRaw=todouble(CounterValue); let CpuStats=CpuRows | summarize AverageRaw=avg(todouble(CounterValue)), PeakRaw=max(todouble(CounterValue)) by InstanceName | project Process=InstanceName, AverageRaw, PeakRaw; let PidLatest=P | where CounterName == \"ID Process\" | summarize arg_max(TimeGenerated, CounterValue) by InstanceName | project Process=InstanceName, PID=toint(CounterValue); let CPU=CpuLatest | join kind=leftouter CpuStats on Process | join kind=leftouter PidLatest on Process | extend Divisor=iff(Cores > 0,Cores,1.0), Current=min_of(100.0,CurrentRaw/Divisor), Average=min_of(100.0,AverageRaw/Divisor), Peak=min_of(100.0,PeakRaw/Divisor), Metric=\"CPU\", Unit=\"%\" | project Metric, Process, PID, Current, Average, Peak, Unit, LastSample | top 3 by Current desc; let MemRows=P | where CounterName == \"Working Set - Private\"; let MemLatest=MemRows | summarize arg_max(TimeGenerated, CounterValue) by InstanceName | project Process=InstanceName, LastSample=TimeGenerated, CurrentRaw=todouble(CounterValue); let MemStats=MemRows | summarize AverageRaw=avg(todouble(CounterValue)), PeakRaw=max(todouble(CounterValue)) by InstanceName | project Process=InstanceName, AverageRaw, PeakRaw; let Memory=MemLatest | join kind=leftouter MemStats on Process | join kind=leftouter PidLatest on Process | extend Current=CurrentRaw/1024.0/1024.0, Average=AverageRaw/1024.0/1024.0, Peak=PeakRaw/1024.0/1024.0, Metric=\"Memory\", Unit=\"MB\" | project Metric, Process, PID, Current, Average, Peak, Unit, LastSample | top 3 by Current desc; union CPU,Memory | order by Metric asc, Current desc')",
+                    "timespan": "PT30M"
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://api.loganalytics.io"
+                  }
+                }
+              }
+            },
+            "runAfter": {
+              "Query_VM_Resource_Graph": [
+                "Succeeded"
+              ]
+            },
+            "else": {
+              "actions": {
+                "Build_VM_Discovery_Failure": {
+                  "type": "Compose",
+                  "inputs": {
+                    "requestId": "@outputs('Request_ID')",
+                    "hostname": "@outputs('Normalize_Current_Hostname')",
+                    "status": "Failed",
+                    "message": "@if(equals(length(body('Query_VM_Resource_Graph')?['data']),0),'No Azure VM matched the supplied hostname.','More than one Azure VM matched the supplied hostname. Use a unique VM/OS hostname.')",
+                    "matches": "@body('Query_VM_Resource_Graph')?['data']"
+                  }
+                },
+                "Write_VM_Discovery_Failure": {
+                  "runAfter": {
+                    "Build_VM_Discovery_Failure": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Http",
+                  "inputs": {
+                    "uri": "@outputs('VM_Result_Blob_URL')",
+                    "method": "PUT",
+                    "headers": {
+                      "x-ms-blob-type": "BlockBlob",
+                      "x-ms-version": "2023-11-03",
+                      "x-ms-date": "@formatDateTime(utcNow(),'R')",
+                      "Content-Type": "application/json"
+                    },
+                    "body": "@outputs('Build_VM_Discovery_Failure')",
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "audience": "https://storage.azure.com/"
+                    }
+                  }
+                }
+              }
+            },
+            "expression": {
+              "equals": [
+                "@length(body('Query_VM_Resource_Graph')?['data'])",
+                1
+              ]
+            },
+            "type": "If"
+          },
+          "Build_ARG_Query_Failure": {
+            "runAfter": {
+              "Query_VM_Resource_Graph": [
+                "Failed",
+                "TimedOut"
+              ]
+            },
+            "type": "Compose",
+            "inputs": {
+              "requestId": "@outputs('Request_ID')",
+              "hostname": "@outputs('Normalize_Current_Hostname')",
+              "status": "Failed",
+              "message": "Azure Resource Graph VM discovery failed.",
+              "details": "@coalesce(actions('Query_VM_Resource_Graph')?['outputs']?['body'],json('{}'))"
+            }
+          },
+          "Write_ARG_Query_Failure": {
+            "runAfter": {
+              "Build_ARG_Query_Failure": [
+                "Succeeded"
+              ]
+            },
+            "type": "Http",
+            "inputs": {
+              "uri": "@outputs('VM_Result_Blob_URL')",
+              "method": "PUT",
+              "headers": {
+                "x-ms-blob-type": "BlockBlob",
+                "x-ms-version": "2023-11-03",
+                "x-ms-date": "@formatDateTime(utcNow(),'R')",
+                "Content-Type": "application/json"
+              },
+              "body": "@outputs('Build_ARG_Query_Failure')",
+              "authentication": {
+                "type": "ManagedServiceIdentity",
+                "audience": "https://storage.azure.com/"
+              }
+            }
+          }
+        },
+        "runAfter": {
+          "Request_Is_Valid": [
+            "Succeeded"
+          ]
+        },
+        "type": "Foreach",
+        "runtimeConfiguration": {
+          "concurrency": {
+            "repetitions": 1
+          }
+        }
+      },
+      "Collect_Parallel_VM_Results": {
+        "foreach": "@outputs('Distinct_Hostnames')",
+        "actions": {
+          "Normalize_Result_Hostname": {
+            "type": "Compose",
+            "inputs": "@toUpper(trim(item()))"
+          },
+          "Result_Blob_URL": {
+            "runAfter": {
+              "Normalize_Result_Hostname": [
+                "Succeeded"
+              ]
+            },
+            "type": "Compose",
+            "inputs": "@concat(substring(triggerBody()?['statusBlobUrl'],0,lastIndexOf(triggerBody()?['statusBlobUrl'],'/')),'/health-parallel-results/',outputs('Request_ID'),'/',toLower(outputs('Normalize_Result_Hostname')),'.json')"
+          },
+          "Get_VM_Health_Result": {
+            "runAfter": {
+              "Result_Blob_URL": [
+                "Succeeded"
+              ]
+            },
+            "type": "Http",
+            "inputs": {
+              "uri": "@outputs('Result_Blob_URL')",
+              "method": "GET",
+              "headers": {
+                "x-ms-version": "2023-11-03",
+                "x-ms-date": "@formatDateTime(utcNow(),'R')",
+                "Accept": "application/json"
+              },
+              "authentication": {
+                "type": "ManagedServiceIdentity",
+                "audience": "https://storage.azure.com/"
+              }
+            }
+          },
+          "Append_VM_Health_Result": {
+            "runAfter": {
+              "Get_VM_Health_Result": [
+                "Succeeded"
+              ]
+            },
+            "type": "AppendToArrayVariable",
+            "inputs": {
+              "name": "HealthResults",
+              "value": "@body('Get_VM_Health_Result')"
+            }
+          },
+          "Build_VM_Result_Read_Failure": {
+            "runAfter": {
+              "Get_VM_Health_Result": [
+                "Failed",
+                "TimedOut"
+              ]
+            },
+            "type": "Compose",
+            "inputs": {
+              "hostname": "@outputs('Normalize_Result_Hostname')",
+              "status": "Failed",
+              "message": "The parallel VM health iteration did not produce a readable result record."
+            }
+          },
+          "Append_VM_Result_Read_Failure": {
+            "runAfter": {
+              "Build_VM_Result_Read_Failure": [
+                "Succeeded"
+              ]
+            },
+            "type": "AppendToArrayVariable",
+            "inputs": {
+              "name": "HealthResults",
+              "value": "@outputs('Build_VM_Result_Read_Failure')"
+            }
+          }
+        },
+        "runAfter": {
+          "For_Each_Hostname": [
+            "Succeeded",
+            "Failed",
+            "TimedOut",
+            "Skipped"
+          ]
+        },
+        "type": "Foreach",
+        "runtimeConfiguration": {
+          "concurrency": {
+            "repetitions": 1
+          }
+        }
+      },
+      "Successful_Health_Results": {
+        "runAfter": {
+          "Collect_Parallel_VM_Results": [
+            "Succeeded",
+            "Failed",
+            "TimedOut",
+            "Skipped"
+          ]
+        },
+        "type": "Query",
+        "inputs": {
+          "from": "@variables('HealthResults')",
+          "where": "@or(equals(item()?['status'],'Completed'),equals(item()?['status'],'CompletedWithWarnings'))"
+        }
+      },
+      "Warning_Health_Results": {
+        "runAfter": {
+          "Successful_Health_Results": [
+            "Succeeded"
+          ]
+        },
+        "type": "Query",
+        "inputs": {
+          "from": "@variables('HealthResults')",
+          "where": "@equals(item()?['status'],'CompletedWithWarnings')"
+        }
+      },
+      "Failed_Health_Results": {
+        "runAfter": {
+          "Warning_Health_Results": [
+            "Succeeded"
+          ]
+        },
+        "type": "Query",
+        "inputs": {
+          "from": "@variables('HealthResults')",
+          "where": "@and(not(equals(item()?['status'],'Completed')),not(equals(item()?['status'],'CompletedWithWarnings')))"
+        }
+      },
+      "Final_Health_Status": {
+        "runAfter": {
+          "Failed_Health_Results": [
+            "Succeeded"
+          ]
+        },
+        "type": "Compose",
+        "inputs": "@if(equals(outputs('Request_Is_Valid'),false),'Failed',if(and(greater(length(body('Successful_Health_Results')),0),equals(length(body('Failed_Health_Results')),0),equals(length(body('Warning_Health_Results')),0)),'Completed',if(greater(length(body('Successful_Health_Results')),0),'PartiallyCompleted','Failed')))"
+      },
+      "Write_Final_Health_Status": {
+        "runAfter": {
+          "Final_Health_Status": [
+            "Succeeded"
+          ]
+        },
+        "type": "Http",
+        "inputs": {
+          "uri": "@triggerBody()?['statusBlobUrl']",
+          "method": "PUT",
+          "headers": {
+            "x-ms-blob-type": "BlockBlob",
+            "x-ms-version": "2023-11-03",
+            "x-ms-date": "@formatDateTime(utcNow(),'R')",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "requestId": "@outputs('Request_ID')",
+            "requesterUserId": "@triggerBody()?['requesterUserId']",
+            "requesterUserName": "@triggerBody()?['requesterUserName']",
+            "status": "@outputs('Final_Health_Status')",
+            "message": "@if(equals(outputs('Request_Is_Valid'),false),'The VM health diagnostic request failed validation.',if(equals(outputs('Final_Health_Status'),'Completed'),'All requested VM health data was collected successfully.',if(equals(outputs('Final_Health_Status'),'PartiallyCompleted'),'VM health collection completed, but one or more VMs or data sources returned warnings.','No requested VM health diagnostic completed successfully.')))",
+            "submittedUtc": "@triggerBody()?['submittedUtc']",
+            "completedUtc": "@utcNow()",
+            "periodMinutes": "@int(triggerBody()?['periodMinutes'])",
+            "submittedCount": "@length(outputs('Distinct_Hostnames'))",
+            "successCount": "@if(equals(outputs('Request_Is_Valid'),false),0,length(body('Successful_Health_Results')))",
+            "warningCount": "@if(equals(outputs('Request_Is_Valid'),false),0,length(body('Warning_Health_Results')))",
+            "failureCount": "@if(equals(outputs('Request_Is_Valid'),false),length(outputs('Distinct_Hostnames')),length(body('Failed_Health_Results')))",
+            "results": "@if(equals(outputs('Request_Is_Valid'),false),json('[]'),variables('HealthResults'))"
+          },
+          "authentication": {
+            "type": "ManagedServiceIdentity",
+            "audience": "https://storage.azure.com/"
+          }
+        }
+      }
+    },
+    "parameters": {
+      "maximumHostnames": {
+        "defaultValue": 1,
+        "type": "Int"
+      },
+      "resourceGraphApiVersion": {
+        "defaultValue": "2024-04-01",
+        "type": "String"
+      },
+      "computeApiVersion": {
+        "defaultValue": "2026-03-01",
+        "type": "String"
+      },
+      "resourceHealthApiVersion": {
+        "defaultValue": "2025-05-01",
+        "type": "String"
+      },
+      "metricsApiVersion": {
+        "defaultValue": "2023-10-01",
+        "type": "String"
+      },
+      "dcrApiVersion": {
+        "defaultValue": "2024-03-11",
+        "type": "String"
+      },
+      "backupApiVersion": {
+        "defaultValue": "2026-01-01",
+        "type": "String"
+      },
+      "alertsManagementApiVersion": {
+        "defaultValue": "2019-03-01",
+        "type": "String"
+      },
+      "activityLogApiVersion": {
+        "defaultValue": "2015-04-01",
+        "type": "String"
+      },
+      "networkApiVersion": {
+        "defaultValue": "2025-05-01",
+        "type": "String"
+      },
+      "$connections": {
+        "type": "Object",
+        "defaultValue": {}
+      },
+      "westEuropeLawName": {
+        "defaultValue": "central-law-weu-law",
+        "type": "String"
+      },
+      "westEuropeFallbackLawName": {
+        "defaultValue": "test-prod-westeu-001-log",
+        "type": "String"
+      }
+    }
+  },
+  "parameters": {
+    "maximumHostnames": {
+      "value": 1
+    },
+    "resourceGraphApiVersion": {
+      "value": "2024-04-01"
+    },
+    "computeApiVersion": {
+      "value": "2026-03-01"
+    },
+    "resourceHealthApiVersion": {
+      "value": "2025-05-01"
+    },
+    "metricsApiVersion": {
+      "value": "2023-10-01"
+    },
+    "dcrApiVersion": {
+      "value": "2024-03-11"
+    },
+    "backupApiVersion": {
+      "value": "2026-01-01"
+    },
+    "alertsManagementApiVersion": {
+      "value": "2019-03-01"
+    },
+    "activityLogApiVersion": {
+      "value": "2015-04-01"
+    },
+    "networkApiVersion": {
+      "value": "2025-05-01"
+    },
+    "$connections": {
+      "type": "Object",
+      "value": {}
+    },
+    "westEuropeLawName": {
+      "value": "central-law-weu-law"
+    },
+    "westEuropeFallbackLawName": {
+      "value": "test-prod-westeu-001-log"
+    }
+  }
+}
